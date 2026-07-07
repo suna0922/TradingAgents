@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>回测报告 - 000960</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --red: #e74c3c;
+    --green: #27ae60;
+    --blue: #3498db;
+    --gray: #95a5a6;
+    --dark: #2c3e50;
+    --light: #ecf0f1;
+    --bg: #f8f9fa;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--dark); line-height: 1.6; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+  h1 { text-align: center; padding: 20px 0; font-size: 1.8em; border-bottom: 3px solid var(--blue); margin-bottom: 24px; }
+  h2 { font-size: 1.3em; color: var(--dark); margin: 30px 0 15px; padding-left: 12px; border-left: 4px solid var(--blue); }
+  /* KPI 卡片 */
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 30px; }
+  .kpi-card { background: white; border-radius: 10px; padding: 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  .kpi-label { font-size: 0.85em; color: var(--gray); margin-bottom: 4px; }
+  .kpi-value { font-size: 1.6em; font-weight: bold; }
+  .positive { color: var(--red); }  /* A股红涨 */
+  .negative { color: var(--green); } /* A股绿跌 */
+  .neutral { color: var(--gray); }
+  /* 图表 */
+  .chart-container { background: white; border-radius: 10px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 24px; position: relative; height: 400px; }
+  .chart-container.tall { height: 500px; }
+  /* 表格 */
+  table { width: 100%; border-collapse: collapse; background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  th { background: var(--dark); color: white; padding: 10px 14px; text-align: left; font-weight: 500; font-size: 0.9em; }
+  td { padding: 9px 14px; border-bottom: 1px solid #eee; font-size: 0.88em; }
+  tr:hover td { background: #f0f7ff; }
+  .text-right { text-align: right; }
+  .text-center { text-align: center; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.82em; font-weight: 600; }
+  .badge-buy { background: #fde8e8; color: var(--red); }
+  .badge-sell { background: #e8f5e9; color: var(--green); }
+  .badge-hold { background: #f0f0f0; color: var(--gray); }
+  /* 页脚 */
+  footer { text-align: center; color: var(--gray); padding: 30px; font-size: 0.85em; border-top: 1px solid #ddd; margin-top: 40px; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>📊 000960 A股回测报告</h1>
+
+<!-- KPI 仪表盘 -->
+<div class="kpi-grid">
+<div class="kpi-card">
+  <div class="kpi-label">总收益率</div>
+  <div class="kpi-value positive">9.50%</div>
+</div>
+<div class="kpi-card">
+  <div class="kpi-label">年化收益</div>
+  <div class="kpi-value positive">4.67%</div>
+</div>
+<div class="kpi-card">
+  <div class="kpi-label">最大回撤</div>
+  <div class="kpi-value negative">7.59%</div>
+</div>
+<div class="kpi-card">
+  <div class="kpi-label">夏普比率</div>
+  <div class="kpi-value neutral">0.71</div>
+</div>
+<div class="kpi-card">
+  <div class="kpi-label">交易胜率</div>
+  <div class="kpi-value negative">25.0%</div>
+</div>
+<div class="kpi-card">
+  <div class="kpi-label">超额收益(α)</div>
+  <div class="kpi-value negative">-154.58%</div>
+</div>
+<div class="kpi-card">
+  <div class="kpi-label">基准收益</div>
+  <div class="kpi-value positive">164.08%</div>
+</div>
+<div class="kpi-card">
+  <div class="kpi-label">交易次数</div>
+  <div class="kpi-value neutral">36</div>
+</div>
+</div>
+
+
+<h2>💰 净值曲线 (000960)</h2>
+<div class="chart-container tall">
+  <canvas id="navChart"></canvas>
+</div>
+
+
+<h2>📉 回撤曲线</h2>
+<div class="chart-container">
+  <canvas id="ddChart"></canvas>
+</div>
+
+
+<h2>📊 每日仓位比例</h2>
+<div class="chart-container">
+  <canvas id="posChart"></canvas>
+</div>
+
+
+<h2>📋 交易记录明细</h2>
+<table>
+<thead><tr><th>#</th><th>买入日期</th><th>卖出日期</th><th>方向</th>
+<th>买入价</th><th>卖出价</th><th>股数</th><th>盈亏(¥)</th><th>收益率</th><th>退出原因</th></tr></thead>
+<tbody>
+            <tr>
+              <td class="text-center">1</td>
+              <td>2024-02-21</td>
+              <td>-</td>
+              <td><span class="badge badge-buy">BUY</span></td>
+              <td class="text-right">12.47</td>
+              <td class="text-right">-</td>
+              <td class="text-center">48,100</td>
+              <td class="text-right neutral">0.00</td>
+              <td class="text-right neutral">0.00%</td>
+              <td></td>
+            </tr>
+            <tr>
+              <td class="text-center">2</td>
+              <td>2024-02-21</td>
+              <td>2024-03-06</td>
+              <td><span class="badge badge-sell">SELL</span></td>
+              <td class="text-right">12.47</td>
+              <td class="text-right">12.70</td>
+              <td class="text-center">48,100</td>
+              <td class="text-right positive">+9,633.00</td>
+              <td class="text-right positive">1.84%</td>
+              <td>trailing_stop</td>
+            </tr>
+            <tr>
+              <td class="text-center">3</td>
+              <td>2024-03-11</td>
+              <td>-</td>
+              <td><span class="badge badge-buy">BUY</span></td>
+              <td class="text-right">12.97</td>
+              <td class="text-right">-</td>
+              <td class="text-center">46,600</td>
+              <td class="text-right neutral">0.00</td>
+              <td class="text-right neutral">0.00%</td>
+              <td></td>
+            </tr>
+            <tr>
+              <td class="text-center">4</td>
+              <td>2024-03-11</td>
+              <td>2024-04-15</td>
+              <td><span class="badge badge-sell">SELL</span></td>
+              <td class="text-right">12.97</td>
+              <td class="text-right">13.96</td>
+              <td class="text-center">46,600</td>
+              <td class="text-right positive">+44,396.85</td>
+              <td class="text-right positive">7.59%</td>
+              <td>trailing_stop</td>
+            </tr></tbody>
+</table>
+
+
+<h2>🧠 L1 决策记录</h2>
+<table>
+<thead><tr><th>日期</th><th>类型</th><th>方向</th><th>目标仓位</th>
+<th>信号</th><th>PM评级</th><th>触发原因</th></tr></thead>
+<tbody>
+            <tr>
+              <td>2024-02-20</td>
+              <td><span class="badge badge-hold">L1</span></td>
+              <td><span class="badge badge-buy">BUY</span></td>
+              <td class="text-center">60%</td>
+              <td>Buy</td>
+              <td>Buy</td>
+              <td>price_change > 10%</td>
+            </tr></tbody>
+</table>
+
+
+<footer>
+  <p>Generated by TradingAgents Backtest Engine | 2026-05-27 19:18:54</p>
+</footer>
+</div>
+
+<script>
+// Net Value Chart
+(function(){
+  const ctx = document.getElementById('navChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: ["2024-01-02", "2024-01-03", "2024-02-21", "2024-03-06", "2026-05-20"],
+      datasets: [
+        {
+          label: '策略净值',
+          data: [1000000, 1000000, 999310, 409098, 1093350],
+          borderColor: '#e74c3c',
+          backgroundColor: 'rgba(231,76,60,0.05)',
+          fill: true,
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 2,
+        },
+        {
+          label: '买入持有',
+          data: [1000000, 996377, 2640775],
+          borderColor: '#3498db',
+          backgroundColor: 'rgba(52,152,223,0.02)',
+          fill: false,
+          tension: 0.1,
+          pointRadius: 0,
+          borderWidth: 1.5,
+          borderDash: [5, 5],
+        },
+        {
+          label: '初始资金',
+          data: Array(5).fill(1000000),
+          borderColor: '#95a5a6',
+          borderDash: [2, 4],
+          pointRadius: 0,
+          borderWidth: 1,
+        },
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { position: 'top' }, tooltip: { callbacks: { label: function(c){ return c.dataset.label + ': ¥' + c.parsed.y.toLocaleString(); } } } },
+      scales: { x: { ticks: { maxTicksLimit: 20, maxRotation: 0 } }, y: { ticks: { callback: function(v){ return '¥' + v.toLocaleString(); } } } }
+    }
+  });
+})();
+// Drawdown Chart
+(function(){
+  const ctx = document.getElementById('ddChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'area',
+    data: {
+      labels: ["2024-01-02", "2024-01-03", "2024-02-21", "2024-03-06", "2026-05-20"],
+      datasets: [{
+        label: '回撤 (%)',
+        data: [0.0, 0.0, 0.07, 59.09, 0.0],
+        backgroundColor: function(context) {
+          const val = context.raw || 0;
+          return val > 15 ? 'rgba(231,76,60,0.4)' : val > 8 ? 'rgba(243,156,18,0.3)' : 'rgba(39,174,96,0.15)';
+        },
+        borderColor: '#e74c3c',
+        fill: true,
+        tension: 0.05,
+        pointRadius: 0,
+        borderWidth: 1.5,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(c){ return '回撤: ' + c.parsed.y.toFixed(2) + '%'; } } } },
+      scales: { x: { ticks: { maxTicksLimit: 20 } }, y: { reverse: true, ticks: { callback: function(v){ return v.toFixed(1) + '%'; } } } }
+    }
+  });
+})();
+// Position Chart
+(function(){
+  const ctx = document.getElementById('posChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: ["2024-01-02", "2024-01-03", "2024-02-21", "2024-03-06", "2026-05-20"],
+      datasets: [{
+        label: '仓位 (%)',
+        data: [0, 0, 60.0, 0, 61.7],
+        backgroundColor: 'rgba(52,152,223,0.15)',
+        borderColor: '#3498db',
+        fill: true,
+        tension: 0.1,
+        pointRadius: 0,
+        borderWidth: 1.5,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: { x: { ticks: { maxTicksLimit: 20 } }, y: { min: 0, max: 105, ticks: { callback: function(v){ return v + '%'; } } } }
+    }
+  });
+})();
+</script>
+</body>
+</html>

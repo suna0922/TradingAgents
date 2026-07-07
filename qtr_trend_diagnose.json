@@ -1,0 +1,223 @@
+{
+  "code": "600519",
+  "name": "贵州茅台",
+  "annual_trends": {
+    "roe_trend": {
+      "status": "有数据",
+      "detail": "[29.9, 30.26, 34.19, 36.02, 32.53]"
+    },
+    "net_profit_margin_parent_trend": {
+      "status": "有数据",
+      "detail": "[47.92444171414429, 49.16936188165812, 49.637292501731885, 49.51540781279126, 47"
+    },
+    "ocf_to_netprofit_trend": {
+      "status": "有数据",
+      "detail": "[1.2205203951750114, 0.5851415415244152, 0.8910694458265696, 1.0723145052465903,"
+    },
+    "debt_ratio_trend": {
+      "status": "有数据",
+      "detail": "[22.8126739768969, 19.474492712829385, 17.984324139179147, 19.044755657916053, 1"
+    },
+    "equity_trend": {
+      "status": "有数据",
+      "detail": "[196957506705.34, 204938081263.86, 223656469294.82, 242011315120.6, 253959253909"
+    },
+    "interest_debt_trend": {
+      "status": "有数据",
+      "detail": "[0.0408827937214622, 0.042966915651088365, 0.020922240776060825, 0.0374487847314"
+    },
+    "cash_coverage_trend": {
+      "status": "有数据",
+      "detail": "[496.6478124317199, 532.9099503705764, 1210.5912238467145, 529.6581855386872, 11"
+    },
+    "cash_ratio_trend": {
+      "status": "有数据",
+      "detail": "[20.304350067861453, 22.897496887198248, 25.32828106670711, 19.8350553714725, 17"
+    },
+    "production_asset_trend": {
+      "status": "有数据",
+      "detail": "[10.190345249969587, 11.408265392547602, 11.228108117150594, 10.995774709857447,"
+    },
+    "r_d_expense_trend": {
+      "status": "有数据",
+      "detail": "[61923213.59, 135185680.4, 157371873.01, 218375472.87, 190112246.58]"
+    },
+    "dividend_payout_trend": {
+      "status": "有数据",
+      "detail": "[50.44303687167655, 91.45486087778858, 78.6015814243035, 82.26612314266804, 81.6"
+    },
+    "gross_margin_trend": {
+      "status": "有数据",
+      "detail": "[91.7933247925105, 92.08690293300755, 92.11792785866159, 92.08156650336359, 91.3"
+    },
+    "inventory_ratio_trend": {
+      "status": "有数据",
+      "detail": "[13.087197275469059, 15.255107353400907, 17.02795854084369, 18.17838114751872, 2"
+    },
+    "receivables_ratio_trend": {
+      "status": "有数据",
+      "detail": "[None, 0.04966206119594853, 0.02724860397143992, 0.6701516919272573, 0.000858706"
+    },
+    "goodwill_ratio_trend": {
+      "status": "有数据",
+      "detail": "[None, None, None, None, None]"
+    },
+    "non_core_asset_ratio_trend": {
+      "status": "有数据",
+      "detail": "[0.002054500462612456, 0.002096278849793263, 0.001517620274480722, 0.00255069612"
+    },
+    "other_receivable_ratio_trend": {
+      "status": "有数据",
+      "detail": "[None, None, None, None, None]"
+    },
+    "production_asset_roe_trend": {
+      "status": "有数据",
+      "detail": "[201.7502313905689, 216.0129082182981, 244.07733964373907, 262.3206825405785, 24"
+    },
+    "short_long_ratio_trend": {
+      "status": "有数据",
+      "detail": "[inf, inf, inf, inf, inf]"
+    },
+    "payables_ratio_trend": {
+      "status": "有数据",
+      "detail": "[0.7876500808811802, 0.9463116841834343, 1.1342482431491319, 1.1757929283300335,"
+    },
+    "dividend_ocf_ratio_trend": {
+      "status": "有数据",
+      "detail": "[41.33, 156.3, 88.21, 76.72, 109.25]"
+    },
+    "finance_cost_ratio_trend": {
+      "status": "有数据",
+      "detail": "[-9999, -9999, -9999, -9999, -9999]"
+    },
+    "interest_coverage_trend": {
+      "status": "有数据",
+      "detail": "[-9999, -9999, -9999, -9999, -9999]"
+    },
+    "receivables_to_payables_trend": {
+      "status": "有数据",
+      "detail": "[None, 0.05, 0.02, 0.57, 0.0]"
+    }
+  },
+  "quarter_trends": {
+    "roe_trend": {
+      "status": "有数据",
+      "detail": "[10.92, 17.89, 24.64, 10.57]"
+    },
+    "net_profit_margin_parent_trend": {
+      "status": "有数据",
+      "detail": "[52.18832316670097, 46.79783622707875, 48.288678845484796, 49.80084551002002]"
+    },
+    "ocf_to_netprofit_trend": {
+      "status": "有数据",
+      "detail": "[0.3281200893625243, 0.2322690392819179, 1.3045163524395542, 0.9877903474357742]"
+    },
+    "debt_ratio_trend": {
+      "status": "有数据",
+      "detail": "[14.143018360379436, 14.75485151865966, 12.808752557869985, 12.122748968206702]"
+    },
+    "equity_trend": {
+      "status": "有数据",
+      "detail": "[268190335170.39, 249135586262.75, 265705024872.85, 281135886435.69]"
+    },
+    "interest_debt_trend": {
+      "status": "有数据",
+      "detail": "[0.013973230331334628, 0.01896811677169143, 0.018851518247777994, 0.016663355988"
+    },
+    "cash_coverage_trend": {
+      "status": "有数据",
+      "detail": "[1195.9137492059294, 931.6160661290128, 900.8714133985319, 915.1643010009752]"
+    },
+    "cash_ratio_trend": {
+      "status": "有数据",
+      "detail": "[16.710778274064406, 17.671002328718917, 16.982793888583977, 15.24970853528456]"
+    },
+    "production_asset_trend": {
+      "status": "有数据",
+      "detail": "[10.60577191025063, 11.372562126013369, 10.945347386408786, 10.50103519150148]"
+    },
+    "r_d_expense_trend": {
+      "status": "有数据",
+      "detail": "[26350331.91, 47551214.05, 39185095.02000001, 59310724.46]"
+    },
+    "dividend_payout_trend": {
+      "status": "NULL",
+      "detail": "None"
+    },
+    "gross_margin_trend": {
+      "status": "NULL",
+      "detail": "None"
+    },
+    "inventory_ratio_trend": {
+      "status": "NULL",
+      "detail": "None"
+    },
+    "receivables_ratio_trend": {
+      "status": "NULL",
+      "detail": "None"
+    },
+    "goodwill_ratio_trend": {
+      "status": "NULL",
+      "detail": "None"
+    },
+    "non_core_asset_ratio_trend": {
+      "status": "NULL",
+      "detail": "None"
+    },
+    "other_receivable_ratio_trend": {
+      "status": "NULL",
+      "detail": "None"
+    },
+    "production_asset_roe_trend": {
+      "status": "NULL",
+      "detail": "None"
+    },
+    "short_long_ratio_trend": {
+      "status": "NULL",
+      "detail": "None"
+    },
+    "payables_ratio_trend": {
+      "status": "NULL",
+      "detail": "None"
+    },
+    "dividend_ocf_ratio_trend": {
+      "status": "有数据",
+      "detail": "[None, None, 10.13, None]"
+    },
+    "finance_cost_ratio_trend": {
+      "status": "有数据",
+      "detail": "[-9999, -9999, -9999, -9999]"
+    },
+    "interest_coverage_trend": {
+      "status": "有数据",
+      "detail": "[-9999, -9999, -9999, -9999]"
+    },
+    "receivables_to_payables_trend": {
+      "status": "有数据",
+      "detail": "[0.57, 0.97, 1.85, 0.01]"
+    }
+  },
+  "diagnosis": {
+    "bs_quarter_count": 4,
+    "prof_quarter_count": 4,
+    "cash_quarter_count": 4,
+    "bs_quarter_dates": [
+      "2025-03-31",
+      "2025-06-30",
+      "2025-09-30",
+      "2026-03-31"
+    ],
+    "prof_quarter_dates": [
+      "2025-03-31",
+      "2025-06-30",
+      "2025-09-30",
+      "2026-03-31"
+    ],
+    "cash_quarter_dates": [
+      "2025-03-31",
+      "2025-06-30",
+      "2025-09-30",
+      "2026-03-31"
+    ]
+  }
+}

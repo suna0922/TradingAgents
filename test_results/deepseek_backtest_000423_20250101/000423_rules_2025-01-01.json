@@ -1,0 +1,29 @@
+[
+  {
+    "name": "[stop_loss] 收盘价有效跌破200日均线",
+    "action": "stop_loss",
+    "condition_str": "收盘价有效跌破200日均线",
+    "priority": 90,
+    "pct": 0.0,
+    "source_sentence": "- [RULE1] [stop_loss] IF 收盘价有效跌破200日均线 THEN stop_loss — 无条件清仓，仓位降至零 (@ 53.96元 (200日均线))",
+    "enabled": true
+  },
+  {
+    "name": "[reduce_position] 收盘价有效跌破50日均线",
+    "action": "sell_half",
+    "condition_str": "收盘价有效跌破50日均线",
+    "priority": 75,
+    "pct": 0.0,
+    "source_sentence": "- [RULE2] [reduce_position] IF 收盘价有效跌破50日均线 THEN reduce_position — 执行第二阶段减持，减持剩余目标减仓量（总仓位11%-20%），总仓位降至标准权重的60%-70% (@ 55.65元 (50日均线))",
+    "enabled": true
+  },
+  {
+    "name": "[entry_zone] 股价触及56元附近",
+    "action": "sell_half",
+    "condition_str": "股价触及56元附近",
+    "priority": 40,
+    "pct": 0.0,
+    "source_sentence": "- [RULE3] [entry_zone] IF 股价触及56元附近 THEN reduce_position — 执行第一阶段减持，减持目标减仓量的一半（总仓位15%-20%） (@ 56.0元 (当前价格区间))",
+    "enabled": true
+  }
+]

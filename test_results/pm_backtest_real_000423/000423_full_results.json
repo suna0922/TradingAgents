@@ -1,0 +1,37 @@
+{
+  "ticker": "000423",
+  "stock_name": "东阿阿胶",
+  "pm_dates": [
+    "2025-01-01",
+    "2025-05-01",
+    "2025-10-01",
+    "2026-04-01"
+  ],
+  "pm_reports": [
+    {
+      "date": "2025-01-01",
+      "signal": "ERROR",
+      "path": "test_results/pm_backtest_real_000423/pm_reports/000423_PM_2025-01-01.md",
+      "success": false
+    },
+    {
+      "date": "2025-05-01",
+      "signal": "ERROR",
+      "path": "test_results/pm_backtest_real_000423/pm_reports/000423_PM_2025-05-01.md",
+      "success": false
+    },
+    {
+      "date": "2025-10-01",
+      "signal": "ERROR",
+      "path": "test_results/pm_backtest_real_000423/pm_reports/000423_PM_2025-10-01.md",
+      "success": false
+    },
+    {
+      "date": "2026-04-01",
+      "signal": "ERROR",
+      "path": "test_results/pm_backtest_real_000423/pm_reports/000423_PM_2026-04-01.md",
+      "success": false
+    }
+  ],
+  "backtest_summaries": []
+}

@@ -1,0 +1,11 @@
+{
+  "ticker": "000423",
+  "pm_date": "2025-01-01",
+  "holding_days": 30,
+  "initial_cash": 1000000,
+  "final_value": 1000000.0,
+  "pnl": 0.0,
+  "pnl_pct": 0.0,
+  "trades": [],
+  "rules_count": 3
+}

@@ -245,12 +245,16 @@ class ExecutionEngine:
                     )
                     # 返回 HOLD 但标记需要复评
                     return ("HOLD", 0.0, 0, f"rating_reeval:{rule.name}", triggered_rules, alert_triggered)
-                # ★ 空仓跳过卖出类规则（避免 SELL 0 股日志噪音）
+                # ★ 卖出类规则触发但无持仓 → 返回 HOLD，阻止继续匹配买入规则
                 if portfolio.shares == 0 and rule.action in (
                     RuleAction.SELL_PCT, RuleAction.SELL_ALL,
                     RuleAction.STOP_LOSS, RuleAction.TAKE_PROFIT,
                 ):
-                    continue
+                    logger.info(
+                        f"[RULE] {rule.action.value} triggered but no position — "
+                        f"HOLD (block further rule matching) @ {close}"
+                    )
+                    return ("HOLD", 0.0, 0, f"skipped(no_pos):{rule.name}", triggered_rules, alert_triggered)
                 logger.info(
                     f"[RULE] Triggered: {rule.description} "
                     f"@ {close} (priority={rule.priority})"

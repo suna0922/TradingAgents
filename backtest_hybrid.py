@@ -239,7 +239,7 @@ class L1Analyzer:
         # L1 分析缓存: {date_str: L1AnalysisResult}
         self._cache: Dict[str, L1AnalysisResult] = {}
 
-    def run_full_analysis(self, symbol: str, date_str: str) -> L1AnalysisResult:
+    def run_full_analysis(self, symbol: str, date_str: str, **kwargs) -> L1AnalysisResult:
         """运行完整分析（fundamentals + market）—— 每季度一次。
 
         对齐 cli/main.py:
@@ -263,11 +263,12 @@ class L1Analyzer:
         logger.info(f"[L1-FULL] {symbol} @ {date_str} | analysts=[fundamentals, market]")
         logger.info(f"{'='*60}")
 
-        result = self._run_analysis(symbol, date_str, ["fundamentals", "market"], deep_model=True)
+        result = self._run_analysis(symbol, date_str, ["fundamentals", "market"], deep_model=True,
+                                    position_context=kwargs.get("position_context", ""))
         self._save_cache(cache_key, result)
         return result
 
-    def run_quick_analysis(self, symbol: str, date_str: str) -> L1AnalysisResult:
+    def run_quick_analysis(self, symbol: str, date_str: str, **kwargs) -> L1AnalysisResult:
         """运行快速分析（market only）—— stale 或 price-change 触发。
 
         对齐 cli/main.py:
@@ -275,7 +276,8 @@ class L1Analyzer:
           - graph.propagate(symbol, date_str)
         """
         logger.info(f"[L1-QUICK] {symbol} @ {date_str} | analysts=[market]")
-        return self._run_analysis(symbol, date_str, ["market"], deep_model=False)
+        return self._run_analysis(symbol, date_str, ["market"], deep_model=False,
+                                  position_context=kwargs.get("position_context", ""))
 
     def _run_analysis(
         self,
@@ -283,6 +285,7 @@ class L1Analyzer:
         date_str: str,
         analysts: List[str],
         deep_model: bool,
+        position_context: str = "",
     ) -> L1AnalysisResult:
         """核心分析执行 — 完全对齐 TradingAgentsGraph.propagate() 流程。"""
         # 构建 config（对齐 CLI: 用 deep/quick 区分模型）
@@ -303,7 +306,7 @@ class L1Analyzer:
 
         # 执行 propagate() — 完全等同于 CLI 的 graph.propagate()
         try:
-            state, signal = graph.propagate(symbol, date_str)
+            state, signal = graph.propagate(symbol, date_str, position_context=position_context)
         except Exception as e:
             logger.error(f"[L1] propagate failed for {symbol} @ {date_str}: {e}")
             raise
@@ -565,7 +568,18 @@ class HybridBacktestEngine:
                 logger.info(f"[SCHEDULE] Quarter start: {current_period} @ {date_str}")
                 logger.info(f"{'─'*40}")
                 try:
-                    result = self.l1_analyzer.run_full_analysis(self.symbol, date_str)
+                    # 构建持仓上下文（供 PM/Trader 决策参考）
+                    pos_ctx = ""
+                    if self.portfolio.shares > 0:
+                        pos_ctx = (
+                            f"---\n📊 Current Portfolio Position:\n"
+                            f"  Shares Held: {self.portfolio.shares:,}"
+                            f" | Avg Cost: ¥{self.portfolio.avg_cost:.2f}"
+                            f" | Current Price: ¥{close:.2f}"
+                            f" | Position %: {self.portfolio.shares * close / (self.portfolio.shares * close + self.portfolio.cash) * 100:.1f}%"
+                        )
+                    result = self.l1_analyzer.run_full_analysis(self.symbol, date_str,
+                                                                position_context=pos_ctx)
                     self.last_quarter_period = current_period
 
                     # 更新基本面指标
@@ -607,7 +621,18 @@ class HybridBacktestEngine:
                 trigger_reason = self._trigger_reason(actual_idx, close)
                 logger.info(f"[SCHEDULE] L1 refresh triggered @ {date_str} (reason={trigger_reason})")
                 try:
-                    result = self.l1_analyzer.run_quick_analysis(self.symbol, date_str)
+                    # 构建持仓上下文
+                    pos_ctx = ""
+                    if self.portfolio.shares > 0:
+                        pos_ctx = (
+                            f"---\n📊 Current Portfolio Position:\n"
+                            f"  Shares Held: {self.portfolio.shares:,}"
+                            f" | Avg Cost: ¥{self.portfolio.avg_cost:.2f}"
+                            f" | Current Price: ¥{close:.2f}"
+                            f" | Position %: {self.portfolio.shares * close / (self.portfolio.shares * close + self.portfolio.cash) * 100:.1f}%"
+                        )
+                    result = self.l1_analyzer.run_quick_analysis(self.symbol, date_str,
+                                                                 position_context=pos_ctx)
 
                     # 构建 WeeklyDecision
                     new_decision = build_weekly_decision_from_rules(

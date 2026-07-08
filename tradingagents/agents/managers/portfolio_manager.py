@@ -38,6 +38,7 @@ def create_portfolio_manager(llm):
         trader_plan = state["trader_investment_plan"]
 
         past_context = state.get("past_context", "")
+        position_context = state.get("position_context", "")
 
         # 截断 past_context 防止 prompt 膨胀（memory log 可积累到 1MB+）
         _MAX_PAST_CONTEXT = 5000
@@ -73,6 +74,8 @@ def create_portfolio_manager(llm):
 {master_methodology}
 
 ---
+
+{position_context}
 
 **Rating Scale** (use exactly one):
 - **Buy**: Strong conviction to enter or add to position

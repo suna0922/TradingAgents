@@ -33,6 +33,7 @@ def create_trader(llm):
             {
                 "role": "system",
                 "content": (
+                    f"{(state.get('position_context', '') + chr(10) + chr(10)) if state.get('position_context') else ''}"
                     "You are a trading agent analyzing market data to make investment decisions. "
                     "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
                     "Anchor your reasoning in the analysts' reports and the research plan. "

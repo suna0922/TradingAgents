@@ -418,6 +418,7 @@ class TradingAgentsGraph:
         init_agent_state = self.propagator.create_initial_state(
             company_name, trade_date, asset_type=asset_type,
             past_context=past_context, stock_name=resolved_name,
+            position_context=kwargs.get("position_context", ""),
         )
         args = self.propagator.get_graph_args()
 

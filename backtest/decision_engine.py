@@ -320,7 +320,7 @@ class DecisionEngine:
         direction = _RATING_TO_DIRECTION.get(signal, TradeDirection.HOLD)
         position_pct = _RATING_TO_POSITION.get(signal, -1.0)
 
-        price_cond = PriceCondition(
+        price_cond = self._safe_price_condition(
             stop_loss=self._extract_stop_loss(pm_text),
             take_profit=self._extract_take_profit(pm_text),
             buy_range=self._extract_entry_range(pm_text),
@@ -382,7 +382,7 @@ class DecisionEngine:
                 return WeeklyDecision(
                     direction=TradeDirection(data.get("direction", "HOLD")),
                     position_pct=data.get("position_pct", -1.0),
-                    price_cond=PriceCondition(
+                    price_cond=self._safe_price_condition(
                         stop_loss=data.get("stop_loss") or 0.0,
                         take_profit=data.get("take_profit") or 0.0,
                         buy_range=self._tuple_from_dict(
@@ -404,17 +404,61 @@ class DecisionEngine:
         # LLM 解析也失败，返回未标记 parsed_ok 的决策
         return self._signal_based_decision(signal, date_str, pm_text)
 
+    # ── 安全默认风控参数 ────────────────────────────────────────
+    # PM 解析失败时的兜底值，防止 PriceCondition 默认 0.0 → 零风控
+    DEFAULT_STOP_LOSS_PCT = 0.08   # 兜底止损 -8%
+    DEFAULT_TAKE_PROFIT_PCT = 0.20 # 兜底止盈 +20%
+
+    def _safe_price_condition(
+        self,
+        stop_loss: float = 0.0,
+        take_profit: float = 0.0,
+        buy_range: Optional[Tuple[float, float]] = None,
+        current_price: float = 0.0,
+    ) -> PriceCondition:
+        """创建 PriceCondition，对 0.0 值使用安全默认值。
+
+        BH-3.1 修复：PM 解析失败时 PriceCondition(stop_loss=0.0, take_profit=0.0)
+        会被 ExecutionEngine 的 stop_loss > 0 判断跳过 → 裸奔持仓。
+        此方法确保在缺失风控参数时使用基于当前价格的兜底值。
+        """
+        safe_stop = stop_loss
+        safe_take = take_profit
+
+        if current_price > 0:
+            if stop_loss <= 0:
+                safe_stop = current_price * (1.0 - self.DEFAULT_STOP_LOSS_PCT)
+                logger.warning(
+                    f"[SafeGuard] stop_loss={stop_loss} → 使用兜底止损 "
+                    f"{safe_stop:.2f} (-{self.DEFAULT_STOP_LOSS_PCT:.0%})"
+                )
+            if take_profit <= 0:
+                safe_take = current_price * (1.0 + self.DEFAULT_TAKE_PROFIT_PCT)
+                logger.warning(
+                    f"[SafeGuard] take_profit={take_profit} → 使用兜底止盈 "
+                    f"{safe_take:.2f} (+{self.DEFAULT_TAKE_PROFIT_PCT:.0%})"
+                )
+
+        return PriceCondition(
+            stop_loss=safe_stop,
+            take_profit=safe_take,
+            buy_range=buy_range,
+        )
+
     def _signal_based_decision(
         self, signal: str, date_str: str, pm_text: str
     ) -> WeeklyDecision:
-        """Layer 3: 仅基于 signal 字符串生成默认决策。"""
+        """Layer 3: 仅基于 signal 字符串生成默认决策。
+
+        使用 _safe_price_condition 防止 stop_loss=0.0 → 零风控（BH-3.1 修复）。
+        """
         direction = _RATING_TO_DIRECTION.get(signal, TradeDirection.HOLD)
         position_pct = _RATING_TO_POSITION.get(signal, -1.0)
 
         return WeeklyDecision(
             direction=direction,
             position_pct=position_pct,
-            price_cond=PriceCondition(),
+            price_cond=self._safe_price_condition(),
             technical_triggers=TechnicalTriggers(),
             fundamental_guards=FundamentalGuards(),
             decision_date=date_str,
@@ -425,11 +469,14 @@ class DecisionEngine:
         )
 
     def _default_decision(self, date_str: str, error_reason: str) -> WeeklyDecision:
-        """异常时的绝对保守默认决策。"""
+        """异常时的绝对保守默认决策。
+
+        使用 _safe_price_condition 防止 stop_loss=0.0 → 零风控（BH-3.1 修复）。
+        """
         return WeeklyDecision(
             direction=TradeDirection.HOLD,
             position_pct=-1.0,   # 不改变仓位
-            price_cond=PriceCondition(),
+            price_cond=self._safe_price_condition(),
             technical_triggers=TechnicalTriggers(),
             fundamental_guards=FundamentalGuards(),
             decision_date=date_str,

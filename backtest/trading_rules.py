@@ -225,8 +225,23 @@ def eval_condition(condition: str, row: Dict[str, Any]) -> bool:
     try:
         result = eval(condition_clean, {"__builtins__": {}}, context)
         return bool(result)
+    except ZeroDivisionError as e:
+        logger.error(
+            f"[eval_condition] Division by zero in: {condition_clean} "
+            f"(original: {condition}) — {e}. Rule SKIPPED for safety."
+        )
+        return False
+    except (TypeError, ValueError) as e:
+        logger.warning(
+            f"[eval_condition] Type/Value error: {condition_clean} "
+            f"(original: {condition}) — {e}. Rule SKIPPED."
+        )
+        return False
     except Exception as e:
-        logger.warning(f"[eval_condition] Failed: {condition_clean} (original: {condition}) — {e}")
+        logger.error(
+            f"[eval_condition] Unexpected error: {condition_clean} "
+            f"(original: {condition}) — {type(e).__name__}: {e}"
+        )
         raise
 
 
@@ -503,14 +518,40 @@ class TradingRule:
     enabled: bool = True
 
     def evaluate_all(self, row: Dict[str, Any]) -> bool:
-        """判断条件是否满足。直接用 eval_condition 执行原文。"""
+        """判断条件是否满足。直接用 eval_condition 执行原文。
+
+        Returns:
+            True if condition is met, False if not met OR evaluation error.
+            Use evaluate_with_reason() if you need to distinguish error vs not-met.
+        """
         if not self.enabled or not self.condition_str:
             return False
         try:
             return eval_condition(self.condition_str, row)
         except Exception as e:
-            logger.warning(f"[TradingRule] eval failed: {e}")
+            logger.error(
+                f"[TradingRule.evaluate_all] Unrecoverable eval error "
+                f"for rule '{self.name}': {type(e).__name__}: {e}"
+            )
             return False
+
+    def evaluate_with_reason(self, row: Dict[str, Any]) -> Tuple[bool, str]:
+        """判断条件是否满足，并返回原因。
+
+        Returns:
+            (result, reason) — reason is one of:
+            'met', 'not_met', 'disabled', 'empty_condition',
+            'eval_error: <details>'
+        """
+        if not self.enabled:
+            return (False, "disabled")
+        if not self.condition_str:
+            return (False, "empty_condition")
+        try:
+            ok = eval_condition(self.condition_str, row)
+            return (ok, "met" if ok else "not_met")
+        except Exception as e:
+            return (False, f"eval_error: {type(e).__name__}: {e}")
 
     @property
     def description(self) -> str:

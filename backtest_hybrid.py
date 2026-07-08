@@ -166,7 +166,10 @@ def build_weekly_decision_from_rules(
     return WeeklyDecision(
         direction=direction,
         position_pct=-1,
-        price_cond=PriceCondition(),
+        price_cond=PriceCondition(
+            stop_loss=0.0,  # 将由 ExecutionEngine 的 _safe_price_condition 兜底
+            take_profit=0.0,
+        ),
         technical_triggers=TechnicalTriggers(),
         fundamental_guards=FundamentalGuards(),
         decision_date=decision_date,

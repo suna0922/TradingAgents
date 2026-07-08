@@ -76,6 +76,19 @@ PARAM_SPACE_DEFAULT: Dict[str, List[Any]] = {
 
     # ── L4 数值容忍度 ──
     "numeric_tolerance_pct": [0.01, 0.02, 0.05],
+
+    # ── L2 Prompt 变体（大师选择） ──
+    # 离散值: 各 Agent 角色对应的大师 ID 列表
+    # 由 build_master_param_space() 在初始化时动态填充
+}
+
+# 默认的大师参数选项（子集，避免参数爆炸）
+# 完整列表见 tools/prompt_variants.py
+MASTER_PARAM_DEFAULTS: Dict[str, List[str]] = {
+    "master_bull":   ["default", "buffett", "lynch", "fisher", "duan_yongping", "simons"],
+    "master_bear":   ["default", "klarman", "marks", "taleb", "soros", "graham"],
+    "master_pm":     ["default", "buffett", "graham", "munger", "dalio", "marks", "lynch"],
+    "master_trader": ["default", "livermore", "druckenmiller", "ptj", "raschke"],
 }
 
 # 推荐的 A 股多股票池（覆盖不同行业/市值）
@@ -189,6 +202,20 @@ def _run_one_backtest(
             engine.l1_analyzer.config["pm_temperature"] = params.get("pm_temperature", 0.0)
         if params.get("numeric_tolerance_pct") is not None:
             os.environ["TRADINGAGENTS_NUMERIC_TOLERANCE_PCT"] = str(params["numeric_tolerance_pct"])
+
+        # ── 注入大师配置（prompt variants） ──
+        # 必须在 engine.run() 之前设置全局 config，因为 agent 创建时
+        # 会调用 get_master_methodology(role) 读取 config
+        from tradingagents.dataflows.config import set_config
+        master_keys = ["master_bull", "master_bear", "master_pm", "master_trader",
+                       "master_aggressive", "master_conservative", "master_neutral"]
+        master_changed = False
+        for key in master_keys:
+            if key in params and params[key] != "default":
+                engine.config[key] = params[key]
+                master_changed = True
+        if master_changed:
+            set_config(engine.config)
 
         result = engine.run()
         summary = result.summary if hasattr(result, "summary") else {}
@@ -396,6 +423,7 @@ class HarnessOptimizer:
         test_symbols: Optional[List[str]] = None,
         holdout_start: Optional[str] = None,
         holdout_end: Optional[str] = None,
+        master_mode: str = "random",  # "random" | "combo" | "none"
     ):
         self.symbols = symbols
         self.start_date = start_date
@@ -404,10 +432,18 @@ class HarnessOptimizer:
         self.n_workers = n_workers
         self.initial_cash = initial_cash
         self.ensemble_method = ensemble_method
+        self.master_mode = master_mode
         self.param_space = param_space or PARAM_SPACE_DEFAULT
         self.test_symbols = test_symbols or []
         self.holdout_start = holdout_start
         self.holdout_end = holdout_end
+
+        # ── 大师选择注入参数空间 ──
+        if self.master_mode != "none":
+            self._param_space_with_masters = dict(self.param_space)
+            self._param_space_with_masters.update(MASTER_PARAM_DEFAULTS)
+        else:
+            self._param_space_with_masters = self.param_space
 
         # 输出目录用第一个股票命名（多股票则用 "multi"）
         tag = symbols[0] if len(symbols) == 1 else "multi"
@@ -419,17 +455,32 @@ class HarnessOptimizer:
     # ── 参数采样 ──────────────────────────────────────────
 
     def _sample_params(self) -> Iterator[Dict[str, Any]]:
-        """随机采样参数组合。"""
+        """随机采样参数组合。支持 master_mode='combo' 使用预定义组合。"""
         import random
         random.seed(42)
 
-        grid = self.param_space
-        for trial_id in range(self.max_trials):
-            params = {}
-            for key, values in grid.items():
-                params[key] = random.choice(values)
-            params["_trial_id"] = trial_id
-            yield params
+        grid = self._param_space_with_masters
+
+        if self.master_mode == "combo":
+            from tools.prompt_variants import RECOMMENDED_COMBOS
+
+            for trial_id in range(self.max_trials):
+                params = {}
+                for key, values in grid.items():
+                    params[key] = random.choice(values)
+                # 为每个 trial 固定一组大师组合
+                combo = RECOMMENDED_COMBOS[trial_id % len(RECOMMENDED_COMBOS)]
+                params.update(combo["masters"])
+                params["_trial_id"] = trial_id
+                params["_master_combo_name"] = combo["name"]
+                yield params
+        else:
+            for trial_id in range(self.max_trials):
+                params = {}
+                for key, values in grid.items():
+                    params[key] = random.choice(values)
+                params["_trial_id"] = trial_id
+                yield params
 
     # ── 主循环 ────────────────────────────────────────────
 
@@ -488,6 +539,9 @@ class HarnessOptimizer:
 
                 if result.status.startswith("ok"):
                     n_ok = len([s for s in result.per_stock if s.status == "ok"])
+                    master_info = ""
+                    if self.master_mode != "none":
+                        master_info = f" | {result.params.get('_master_combo_name', '')}"
                     logger.info(
                         f"  [{completed}/{self.max_trials}] T{trial_id:04d}: "
                         f"score={result.score:.3f} (σ={result.score_std:.3f}) | "
@@ -495,7 +549,7 @@ class HarnessOptimizer:
                         f"sharpe={result.sharpe_ratio:.2f} | "
                         f"dd={result.max_drawdown_pct:+.1f}% | "
                         f"{n_ok}/{len(result.per_stock)} stocks ok | "
-                        f"{result.elapsed_s:.0f}s"
+                        f"{result.elapsed_s:.0f}s{master_info}"
                     )
                 else:
                     logger.warning(
@@ -532,6 +586,12 @@ class HarnessOptimizer:
         logger.info(f"  Sharpe:      {self.best.sharpe_ratio:.2f}")
         logger.info(f"  Max DD:      {self.best.max_drawdown_pct:+.1f}%")
         logger.info(f"  Params:      {json.dumps(p, ensure_ascii=False)}")
+        if self.master_mode != "none":
+            combo_name = self.best.params.get("_master_combo_name", "")
+            masters = {k: v for k, v in self.best.params.items()
+                       if k.startswith("master_") and v != "default"}
+            if masters:
+                logger.info(f"  Masters:     {combo_name} | {json.dumps(masters, ensure_ascii=False)}")
         logger.info("  Per-stock scores:")
         for sr in sorted(self.best.per_stock, key=lambda s: s.score, reverse=True):
             icon = "✅" if sr.status == "ok" else "❌"
@@ -776,6 +836,9 @@ def main():
     parser.add_argument("--output", default="backtest_results/optimize", help="输出目录")
     parser.add_argument("--ensemble", choices=["mean", "median", "min", "mean_penalized"],
                         default="mean", help="多股票聚合方式 (默认: mean)")
+    parser.add_argument("--master-mode", choices=["random", "combo", "none"],
+                        default="random",
+                        help="大师选择模式: random=随机分配, combo=预定义组合, none=不注入大师 (默认: random)")
     parser.add_argument("--params", help="JSON 文件路径: 自定义参数空间")
 
     args = parser.parse_args()
@@ -815,6 +878,7 @@ def main():
         param_space=param_space,
         ensemble_method=args.ensemble,
         test_symbols=test_symbols,
+        master_mode=args.master_mode,
     )
 
     # 运行

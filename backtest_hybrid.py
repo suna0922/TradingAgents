@@ -515,6 +515,128 @@ class HybridBacktestEngine:
         self.daily_states_log: List[Dict] = []
         self.decisions_log: List[Dict] = []
 
+        # ── 断点续传 ──
+        self._checkpoint_interval = 30  # 每 N 个交易日保存一次
+
+    @property
+    def _checkpoint_path(self) -> str:
+        """断点文件路径。"""
+        return os.path.join(self.output_dir, self.symbol, "checkpoint.json")
+
+    def _save_checkpoint(self, actual_idx: int, date_str: str):
+        """保存断点：当前投资组合状态 + 回测日志。"""
+        import json as _json
+        ad = self.active_decision
+        active_decision_dict = None
+        if ad is not None:
+            active_decision_dict = {
+                "signal_raw": ad.signal_raw,
+                "pm_rating": ad.pm_rating,
+                "trading_rules": [r.to_dict() for r in ad.trading_rules],
+                "pm_raw_output": ad.pm_raw_output[:2000],
+                "decision_date": ad.decision_date,
+                "rules_parsed_ok": ad.rules_parsed_ok,
+            }
+
+        ckpt = {
+            "version": 1,
+            "symbol": self.symbol,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "last_date": date_str,
+            "actual_idx": actual_idx,
+            "total_days": None,  # will be set on resume
+            "portfolio": {
+                "cash": self.portfolio.cash,
+                "shares": self.portfolio.shares,
+                "avg_cost": self.portfolio.avg_cost,
+                "total_cost": self.portfolio.total_cost,
+            },
+            "last_decision_price": self.last_decision_price,
+            "last_decision_idx": self.last_decision_idx,
+            "last_quarter_period": self.last_quarter_period,
+            "_last_report_pub_date": self._last_report_pub_date,
+            "_report_dates": self._report_dates,
+            "fa_metrics": self.fa_metrics,
+            "force_decision_next_day": self.force_decision_next_day,
+            "active_decision": active_decision_dict,
+            "daily_states_log": self.daily_states_log,
+            "l1_analyses_log": self.l1_analyses_log,
+            "decisions_log": self.decisions_log,
+        }
+        os.makedirs(os.path.dirname(self._checkpoint_path), exist_ok=True)
+        with open(self._checkpoint_path, "w") as f:
+            _json.dump(ckpt, f, ensure_ascii=False, indent=2)
+        logger.info(f"[CHECKPOINT] Saved @ {date_str} (Day {actual_idx+1})")
+
+    def _load_checkpoint(self) -> Optional[int]:
+        """加载断点，恢复回测状态。返回恢复后的 actual_idx，若无需恢复返回 None。"""
+        import json as _json
+        if not os.path.exists(self._checkpoint_path):
+            return None
+
+        with open(self._checkpoint_path) as f:
+            ckpt = _json.load(f)
+
+        if ckpt.get("symbol") != self.symbol:
+            logger.warning("[CHECKPOINT] Symbol mismatch, ignoring checkpoint")
+            return None
+        if ckpt.get("start_date") != self.start_date or ckpt.get("end_date") != self.end_date:
+            logger.warning("[CHECKPOINT] Date range mismatch, ignoring checkpoint")
+            return None
+
+        # 恢复 portfolio
+        p = ckpt["portfolio"]
+        self.portfolio.cash = p["cash"]
+        self.portfolio.shares = p["shares"]
+        self.portfolio.avg_cost = p["avg_cost"]
+        self.portfolio.total_cost = p["total_cost"]
+
+        # 恢复状态
+        self.last_decision_price = ckpt["last_decision_price"]
+        self.last_decision_idx = ckpt["last_decision_idx"]
+        self.last_quarter_period = ckpt["last_quarter_period"]
+        self._last_report_pub_date = ckpt["_last_report_pub_date"]
+        self._report_dates = ckpt.get("_report_dates", {})
+        self.fa_metrics = ckpt.get("fa_metrics", {})
+        self.force_decision_next_day = ckpt.get("force_decision_next_day", False)
+
+        # 恢复 active_decision
+        ad = ckpt.get("active_decision")
+        if ad:
+            try:
+                from backtest.trading_rules import TradingRule
+                rules = [TradingRule.from_dict(r) for r in ad.get("trading_rules", [])]
+                self.active_decision = WeeklyDecision(
+                    direction=TradeDirection.HOLD,
+                    position_pct=-1,
+                    price_cond=PriceCondition(),
+                    technical_triggers=TechnicalTriggers(),
+                    fundamental_guards=FundamentalGuards(),
+                    decision_date=ad.get("decision_date", ""),
+                    signal_raw=ad.get("signal_raw", "Hold"),
+                    pm_rating=ad.get("pm_rating", ""),
+                    pm_raw_output=ad.get("pm_raw_output", ""),
+                    trading_rules=rules,
+                    rules_parsed_ok=ad.get("rules_parsed_ok", len(rules) > 0),
+                )
+                self.portfolio.active_decision = self.active_decision
+            except Exception as e:
+                logger.warning(f"[CHECKPOINT] Failed to restore active_decision: {e}")
+
+        # 恢复日志
+        self.daily_states_log = ckpt.get("daily_states_log", [])
+        self.l1_analyses_log = ckpt.get("l1_analyses_log", [])
+        self.decisions_log = ckpt.get("decisions_log", [])
+
+        resume_idx = ckpt["actual_idx"]
+        last_date = ckpt["last_date"]
+        logger.info(f"[CHECKPOINT] Resumed from {last_date} (Day {resume_idx+1})")
+        logger.info(f"  Cash: ¥{self.portfolio.cash:,.0f} | "
+                    f"Shares: {self.portfolio.shares} | "
+                    f"Avg Cost: ¥{self.portfolio.avg_cost:.2f}")
+        return resume_idx
+
     def run(self) -> HybridBacktestResult:
         """执行混合回测。"""
         logger.info(f"\n{'#'*60}")
@@ -548,12 +670,16 @@ class HybridBacktestEngine:
         logger.info("[Phase 2] Running hybrid loop...")
         total_days = len(df)
 
-        for idx, row in df.iterrows():
-            # 处理行索引（iterrows 给出 int 索引）
-            if isinstance(idx, int):
-                actual_idx = idx
-            else:
-                actual_idx = df.index.get_loc(idx)
+        # ★ 断点续传: 检查是否有上次运行的 checkpoint
+        resume_idx = self._load_checkpoint()
+        start_idx = resume_idx + 1 if resume_idx is not None else 0
+        if resume_idx is not None:
+            logger.info(f"[CHECKPOINT] Skipping to Day {start_idx+1}/{total_days}")
+
+        for pos in range(start_idx, total_days):
+            idx = df.index[pos]
+            row = df.iloc[pos]
+            actual_idx = pos
 
             date_str = str(row.get("date", row.name))
             if isinstance(row.get("date"), pd.Timestamp):
@@ -698,8 +824,8 @@ class HybridBacktestEngine:
                     "triggered_rules": [], "alert_triggered": False,
                 })
 
-            # 进度
-            if (actual_idx + 1) % 30 == 0 or actual_idx == total_days - 1:
+            # 进度 + 断点保存
+            if (actual_idx + 1) % self._checkpoint_interval == 0 or actual_idx == total_days - 1:
                 total_value = (self.portfolio.cash +
                                self.portfolio.shares * close)
                 pnl = total_value - self.bt_config.initial_cash
@@ -707,6 +833,7 @@ class HybridBacktestEngine:
                 logger.info(f"[PROGRESS] {date_str} | Day {actual_idx+1}/{total_days} | "
                             f"Total: ¥{total_value:,.0f} | PnL: {pnl_pct:+.2f}% | "
                             f"Pos: {self.portfolio.shares} shares")
+                self._save_checkpoint(actual_idx, date_str)
 
         # Phase 3: 计算汇总
         logger.info("\n[Phase 3] Computing summary...")
@@ -727,6 +854,11 @@ class HybridBacktestEngine:
                 "pnl_pct": t.pnl_pct,
                 "exit_reason": t.exit_reason,
             })
+
+        # ★ 完成后清理 checkpoint
+        if os.path.exists(self._checkpoint_path):
+            os.remove(self._checkpoint_path)
+            logger.info("[CHECKPOINT] Cleared (run complete)")
 
         return HybridBacktestResult(
             config={

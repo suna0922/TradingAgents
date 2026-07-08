@@ -142,6 +142,8 @@ class PortfolioState:
     """组合状态（被 BacktestEngine 维护）。"""
     cash: float = 1_000_000.0
     shares: int = 0
+    avg_cost: float = 0.0                          # 平均持仓成本
+    total_cost: float = 0.0                        # 总持仓成本
     current_date: str = ""                          # YYYY-MM-DD
     active_decision: Optional[WeeklyDecision] = None  # 当前生效的决策
     last_decision_executed_date: str = ""           # 最后一次执行决策的日期（防止重复执行）

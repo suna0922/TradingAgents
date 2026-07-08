@@ -803,6 +803,10 @@ class ExecutionEngine:
 
         portfolio.cash -= total_cost
         portfolio.shares += shares
+        # 更新平均成本
+        if portfolio.shares > 0:
+            portfolio.total_cost = portfolio.total_cost + total_cost
+            portfolio.avg_cost = portfolio.total_cost / portfolio.shares
 
         # 记录交易
         trade = TradeRecord(
@@ -858,6 +862,12 @@ class ExecutionEngine:
         pnl_pct = (price - entry_price) / entry_price if entry_price > 0 else 0.0
 
         portfolio.shares -= shares
+        # 更新平均成本（卖出不改变剩余持仓的 avg_cost，但更新 total_cost）
+        if portfolio.shares > 0:
+            portfolio.total_cost = portfolio.shares * portfolio.avg_cost
+        else:
+            portfolio.total_cost = 0.0
+            portfolio.avg_cost = 0.0
 
         # 更新交易记录（找到对应的买入记录并补全）
         trade = TradeRecord(

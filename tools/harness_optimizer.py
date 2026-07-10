@@ -484,8 +484,12 @@ class HarnessOptimizer:
 
     # ── 主循环 ────────────────────────────────────────────
 
-    def run(self) -> Optional[TrialResult]:
-        """执行多股票参数优化循环。"""
+    def run(self, sequential: bool = False) -> Optional[TrialResult]:
+        """执行多股票参数优化循环。
+
+        Args:
+            sequential: 如果 True，在主进程中顺序执行（绕过 ProcessPoolExecutor 的 spawn/fork 问题）。
+        """
         n_sym = len(self.symbols)
 
         logger.info("=" * 60)
@@ -502,6 +506,34 @@ class HarnessOptimizer:
         param_list = list(self._sample_params())
         logger.info(f"[Phase 1] Random Search — {len(param_list)} trials × {n_sym} stocks = {len(param_list) * n_sym} backtests")
 
+        if sequential:
+            # ── 顺序执行（单进程，无 subprocess 问题） ──
+            logger.info("[Mode] Sequential (no ProcessPoolExecutor)")
+            for idx, params in enumerate(param_list):
+                trial_id = params["_trial_id"]
+                worker_kwargs = {
+                    "symbols": self.symbols,
+                    "start_date": self.start_date,
+                    "end_date": self.end_date,
+                    "trial_id": trial_id,
+                    "params": params,
+                    "output_root": str(self.output_root),
+                    "initial_cash": self.initial_cash,
+                    "ensemble_method": self.ensemble_method,
+                }
+                result_dict = _run_multi_stock_trial_worker(worker_kwargs)
+                result = TrialResult.from_dict(result_dict)
+                self.results.append(result)
+                self._log_trial_result(result, idx + 1, self.max_trials)
+                # 每个 trial 完成后保存增量报告（防崩溃丢失）
+                self._save_report_incremental()
+        else:
+            # ── 并行执行（原逻辑） ──
+            self._run_parallel(param_list)
+        # ── 排序 ──
+            futures = {}
+    def _run_parallel(self, param_list: List[Dict[str, Any]]):
+        """并行执行回测试验。"""
         with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
             futures = {}
             for params in param_list:
@@ -536,26 +568,52 @@ class HarnessOptimizer:
                     )
 
                 self.results.append(result)
+                self._log_trial_result(result, completed, self.max_trials)
 
-                if result.status.startswith("ok"):
-                    n_ok = len([s for s in result.per_stock if s.status == "ok"])
-                    master_info = ""
-                    if self.master_mode != "none":
-                        master_info = f" | {result.params.get('_master_combo_name', '')}"
-                    logger.info(
-                        f"  [{completed}/{self.max_trials}] T{trial_id:04d}: "
-                        f"score={result.score:.3f} (σ={result.score_std:.3f}) | "
-                        f"return={result.total_return_pct:+.1f}% | "
-                        f"sharpe={result.sharpe_ratio:.2f} | "
-                        f"dd={result.max_drawdown_pct:+.1f}% | "
-                        f"{n_ok}/{len(result.per_stock)} stocks ok | "
-                        f"{result.elapsed_s:.0f}s{master_info}"
-                    )
-                else:
-                    logger.warning(
-                        f"  [{completed}/{self.max_trials}] T{trial_id:04d}: "
-                        f"FAILED — {result.error_msg[:80]}"
-                    )
+    def _log_trial_result(self, result: TrialResult, idx: int, total: int):
+        """记录单个 trial 结果。"""
+        if result.status.startswith("ok"):
+            n_ok = len([s for s in result.per_stock if s.status == "ok"])
+            master_info = ""
+            if self.master_mode != "none":
+                master_info = f" | {result.params.get('_master_combo_name', '')}"
+            logger.info(
+                f"  [{idx}/{total}] T{result.trial_id:04d}: "
+                f"score={result.score:.3f} (σ={result.score_std:.3f}) | "
+                f"return={result.total_return_pct:+.1f}% | "
+                f"sharpe={result.sharpe_ratio:.2f} | "
+                f"dd={result.max_drawdown_pct:+.1f}% | "
+                f"{n_ok}/{len(result.per_stock)} stocks ok | "
+                f"{result.elapsed_s:.0f}s{master_info}"
+            )
+        else:
+            logger.warning(
+                f"  [{idx}/{total}] T{result.trial_id:04d}: "
+                f"FAILED — {result.error_msg[:80]}"
+            )
+
+    def _save_report_incremental(self):
+        """增量保存当前结果（防止进程崩溃丢失数据）。"""
+        report_path = self.output_root / "optimization_report.json"
+        ok_results = [r for r in self.results if r.status.startswith("ok")]
+        ok_results.sort(key=lambda r: r.score, reverse=True)
+
+        report = {
+            "meta": {
+                "train_symbols": self.symbols,
+                "test_symbols": self.test_symbols,
+                "start_date": self.start_date,
+                "end_date": self.end_date,
+                "max_trials": self.max_trials,
+                "ensemble_method": self.ensemble_method,
+                "generated_at": datetime.now().isoformat(),
+            },
+            "param_space": self.param_space,
+            "best": ok_results[0].to_dict() if ok_results else None,
+            "all_trials": [r.to_dict() for r in self.results],
+            "partial": len(self.results) < self.max_trials,
+        }
+        report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False, default=str))
 
         # ── 排序 ──
         ok_results = [r for r in self.results if r.status.startswith("ok")]
@@ -839,6 +897,8 @@ def main():
     parser.add_argument("--master-mode", choices=["random", "combo", "none"],
                         default="random",
                         help="大师选择模式: random=随机分配, combo=预定义组合, none=不注入大师 (默认: random)")
+    parser.add_argument("--sequential", action="store_true",
+                        help="顺序执行（单进程，绕过 subprocess spawn 问题）")
     parser.add_argument("--params", help="JSON 文件路径: 自定义参数空间")
 
     args = parser.parse_args()
@@ -882,7 +942,7 @@ def main():
     )
 
     # 运行
-    best = opt.run()
+    best = opt.run(sequential=args.sequential)
 
     if best is None:
         logger.error("Optimization failed — no successful trials.")

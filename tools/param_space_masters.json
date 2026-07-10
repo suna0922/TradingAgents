@@ -1,0 +1,9 @@
+{
+  "_description": "仅调优大师选择 — 其余参数固定",
+  "_usage": ".venv/bin/python tools/harness_optimizer.py --symbol 000423 --start 2025-01-01 --end 2025-06-30 --params tools/param_space_masters.json --sequential --max-trials 10",
+
+  "master_bull": ["buffett", "lynch", "fisher", "duan_yongping", "zhang_lei", "munger", "default"],
+  "master_bear": ["klarman", "marks", "taleb", "graham", "soros", "dalio", "default"],
+  "master_pm": ["buffett", "graham", "munger", "lynch", "dalio", "marks", "zhang_lei", "default"],
+  "master_trader": ["livermore", "druckenmiller", "ptj", "raschke", "default"]
+}

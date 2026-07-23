@@ -122,9 +122,19 @@ def flatten_l1_result(
         if latest_val is None:
             continue
         try:
-            metrics[f"{prefix}_{field_name}"] = float(latest_val)
+            latest_float = float(latest_val)
         except (TypeError, ValueError):
             continue
+        metrics[f"{prefix}_{field_name}"] = latest_float
+        # ★ 同时注入"无 _trend 后缀"的别名键（若标量字段没占用该键）。
+        #   PM 规则和 eval_condition 上下文使用 annual_revenue_growth /
+        #   quarter_profit_growth 等无后缀名字，但 L1 里增长率类指标只存在
+        #   于 *_trend 列表 → 以前这些键从不存在，导致所有含年报/季报
+        #   基本面字段的规则全部因 None 比较而静默失效。
+        base_name = field_name[:-len("_trend")] if field_name.endswith("_trend") else field_name
+        alias_key = f"{prefix}_{base_name}"
+        if alias_key not in metrics:
+            metrics[alias_key] = latest_float
     
     return metrics
 

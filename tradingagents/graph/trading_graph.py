@@ -321,19 +321,46 @@ class TradingAgentsGraph:
             )
             return None, None, None
 
-    def _resolve_pending_entries(self, ticker: str) -> None:
+    def _resolve_pending_entries(self, ticker: str, current_date: str = None) -> None:
         """Resolve pending log entries for ticker at the start of a new run.
 
         Fetches returns for each same-ticker pending entry, generates reflections,
         then writes all updates in a single atomic batch write to avoid redundant I/O.
         Skips entries whose price data is not yet available (too recent or delisted).
 
+        1-H 修复：回测模式下只结算 entry_date + holding_days ≤ current_date 的条目，
+        防止用未来行情回头结算历史决策、注入 past_context 造成前视污染。
+
         Trade-off: only same-ticker entries are resolved per run.  Entries for
         other tickers accumulate until that ticker is run again.
+
+        Args:
+            ticker: 股票代码
+            current_date: 当前模拟日期 YYYY-MM-DD（回测模式时传入，实时模式为 None）
         """
         pending = [e for e in self.memory_log.get_pending_entries() if e["ticker"] == ticker]
         if not pending:
             return
+
+        # 1-H 修复：回测模式下过滤掉 holding 期超前的条目
+        from datetime import datetime as _dt, timedelta as _td
+        if current_date:
+            cur_dt = _dt.strptime(current_date, "%Y-%m-%d")
+            hold_days = getattr(self, 'holding_days', 5)  # 默认 5 天持有
+            resolvable = []
+            for e in pending:
+                entry_dt = _dt.strptime(e["date"], "%Y-%m-%d")
+                # 该条目结算需要 entry_date + holding_days ≤ current_date
+                if (entry_dt + _td(days=hold_days)) <= cur_dt:
+                    resolvable.append(e)
+                else:
+                    logger.debug(
+                        f"[Memory] Skipping resolution of {ticker} entry @ {e['date']}: "
+                        f"holding period ({hold_days}d) extends beyond {current_date}"
+                    )
+            pending = resolvable
+            if not pending:
+                return
 
         benchmark = self._resolve_benchmark(ticker)
         updates = []
@@ -361,7 +388,8 @@ class TradingAgentsGraph:
         if updates:
             self.memory_log.batch_update_with_outcomes(updates)
 
-    def propagate(self, company_name, trade_date, asset_type: str = "stock"):
+    def propagate(self, company_name, trade_date, asset_type: str = "stock",
+                  position_state: str = ""):
         """Run the trading agents graph for a company on a specific date.
 
         ``asset_type`` selects between the stock pipeline (default) and the
@@ -370,11 +398,14 @@ class TradingAgentsGraph:
         ``checkpoint_enabled`` is set in config, the graph is recompiled with
         a per-ticker SqliteSaver so a crashed run can resume from the last
         successful node on a subsequent invocation with the same ticker+date.
+        
+        1-A 修复: 新增 position_state 参数，让 PM 感知当前持仓状态。
         """
         self.ticker = company_name
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
-        self._resolve_pending_entries(company_name)
+        # 1-H 修复：传入当前日期限制结算范围，防止未来行情污染 past_context
+        self._resolve_pending_entries(company_name, current_date=trade_date)
 
         # Recompile with a checkpointer if the user opted in.
         if self.config.get("checkpoint_enabled"):
@@ -395,20 +426,49 @@ class TradingAgentsGraph:
                 logger.info("Starting fresh for %s on %s", company_name, trade_date)
 
         try:
-            return self._run_graph(company_name, trade_date, asset_type=asset_type)
+            return self._run_graph_stream(company_name, trade_date, asset_type=asset_type,
+                                          position_state=position_state)
         finally:
             if self._checkpointer_ctx is not None:
                 self._checkpointer_ctx.__exit__(None, None, None)
                 self._checkpointer_ctx = None
                 self.graph = self.workflow.compile()
 
-    def _run_graph(self, company_name, trade_date, asset_type: str = "stock"):
-        """Execute the graph and write the resulting state to disk and memory log."""
-        # Initialize state — inject memory log context for PM.
-        past_context = self.memory_log.get_past_context(company_name)
+    def propagate_stream(
+        self, company_name, trade_date, on_chunk=None, asset_type: str = "stock"
+    ):
+        """Like propagate(), but streams intermediate state via on_chunk callback.
 
-        # Resolve real stock name from ticker code (e.g. "000960" → "锡业股份")
-        # so LLM reports use the correct name instead of hallucinating one.
+        on_chunk(state, node_name) is called after each graph node completes,
+        where ``state`` is the cumulative AgentState dict and ``node_name``
+        is the name of the node that just finished (or "" for initial state).
+        Returns (final_state, signal) same as propagate().
+        """
+        self.ticker = company_name
+        # Web 路径修复：补 current_date 防止 memory 结算无截止
+        self._resolve_pending_entries(company_name, current_date=trade_date)
+
+        if self.config.get("checkpoint_enabled"):
+            self._checkpointer_ctx = get_checkpointer(
+                self.config["data_cache_dir"], company_name
+            )
+            saver = self._checkpointer_ctx.__enter__()
+            self.graph = self.workflow.compile(checkpointer=saver)
+
+        try:
+            return self._run_graph_stream(company_name, trade_date, on_chunk=on_chunk, asset_type=asset_type)
+        finally:
+            if self._checkpointer_ctx is not None:
+                self._checkpointer_ctx.__exit__(None, None, None)
+                self._checkpointer_ctx = None
+                self.graph = self.workflow.compile()
+
+    def _run_graph_stream(
+        self, company_name, trade_date, on_chunk=None, asset_type: str = "stock",
+        position_state: str = "",
+    ):
+        # 1-H 修复：传入当前日期限制记忆范围，防止未来行情结算的 reflection 注入
+        past_context = self.memory_log.get_past_context(company_name, as_of_date=trade_date)
         try:
             from tradingagents.dataflows.akshare_data import get_stock_name
             resolved_name = get_stock_name(company_name)
@@ -418,49 +478,30 @@ class TradingAgentsGraph:
         init_agent_state = self.propagator.create_initial_state(
             company_name, trade_date, asset_type=asset_type,
             past_context=past_context, stock_name=resolved_name,
+            position_state=position_state,
         )
         args = self.propagator.get_graph_args()
+        # Use "updates" mode so we can tell which node produced the delta
+        args["stream_mode"] = "updates"
 
-        # Inject thread_id so same ticker+date resumes, different date starts fresh.
-        if self.config.get("checkpoint_enabled"):
-            tid = thread_id(company_name, str(trade_date))
-            args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
+        final_state = dict(init_agent_state)
+        if on_chunk:
+            on_chunk(final_state, "")
 
-        if self.debug:
-            trace = []
-            for chunk in self.graph.stream(init_agent_state, **args):
-                if len(chunk["messages"]) == 0:
-                    pass
-                else:
-                    chunk["messages"][-1].pretty_print()
-                    trace.append(chunk)
-            # Streamed chunks are per-node deltas. Merge them so the returned
-            # state matches what graph.invoke() yields in the non-debug path.
-            final_state = {}
-            for chunk in trace:
-                final_state.update(chunk)
-        else:
-            final_state = self.graph.invoke(init_agent_state, **args)
+        for chunk in self.graph.stream(init_agent_state, **args):
+            for node_name, node_output in chunk.items():
+                # node_output is a dict of state fields that changed
+                if isinstance(node_output, dict):
+                    final_state.update(node_output)
+                if on_chunk:
+                    on_chunk(final_state, node_name)
 
-        # Store current state for reflection.
         self.curr_state = final_state
-
-        # Log state to disk.
         self._log_state(trade_date, final_state)
-
-        # Store decision for deferred reflection on the next same-ticker run.
         self.memory_log.store_decision(
-            ticker=company_name,
-            trade_date=trade_date,
+            ticker=company_name, trade_date=trade_date,
             final_trade_decision=final_state["final_trade_decision"],
         )
-
-        # Clear checkpoint on successful completion to avoid stale state.
-        if self.config.get("checkpoint_enabled"):
-            clear_checkpoint(
-                self.config["data_cache_dir"], company_name, str(trade_date)
-            )
-
         return final_state, self.process_signal(final_state["final_trade_decision"])
 
     def _log_state(self, trade_date, final_state):

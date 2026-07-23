@@ -21,6 +21,7 @@ Industry presets:
 
 from .loader import (
     get_master_methodology,
+    format_custom_theory,
     get_all_masters_for_role,
     list_available_roles,
     list_available_masters,

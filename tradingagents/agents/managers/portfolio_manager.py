@@ -29,7 +29,7 @@ def create_portfolio_manager(llm):
     structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
 
     def portfolio_manager_node(state) -> dict:
-        instrument_context = build_instrument_context(state["company_of_interest"], stock_name=state.get("stock_name", ""))
+        instrument_context = build_instrument_context(state["company_of_interest"], stock_name=state.get("stock_name", ""), curr_date=state.get("trade_date"))
         master_methodology = get_master_methodology("portfolio_manager")
 
         history = state["risk_debate_state"]["history"]
@@ -51,6 +51,14 @@ def create_portfolio_manager(llm):
         lessons_line = (
             f"- Lessons from prior decisions and outcomes:\n{past_context}\n"
             if past_context
+            else ""
+        )
+
+        # 1-A 修复: 注入当前持仓状态，让 PM 决策时知道现有仓位
+        ps = state.get("position_state", "")
+        position_context = (
+            f"- Current portfolio position: {ps}\n"
+            if ps
             else ""
         )
 
@@ -85,6 +93,7 @@ def create_portfolio_manager(llm):
 - Research Manager's investment plan: **{research_plan}**
 - Trader's transaction proposal: **{trader_plan}**
 {lessons_line}
+{position_context}
 **Risk Analysts Debate History:**
 {history}
 
@@ -122,6 +131,8 @@ Minimum required rules (if applicable):
 - **Reduce-position thresholds**: Intermediate levels where you cut part of the position
 - **Observation anchors**: Key technical levels to watch (support/resistance/MA crossovers)
 - **Take-profit target**: If a price target exists, register it as a take_profit rule
+- **Circuit-breaker / black-swan hedge**: If fundamentals deteriorate catastrophically (e.g. `annual_roe < 5`, `quarter_ocf_to_netprofit < 0`, `annual_debt_ratio > 80`), register a `circuit_break` rule to unconditionally liquidate. Example:
+  * `annual_roe < 5 AND quarter_ocf_to_netprofit < 0` → action: `circuit_break` (unconditional liquidation)
 
 **🏷️ POSITION SIZING (MANDATORY):** Don't wait for perfect entries. When close > MA(close,200) + fundamentals solid, start small (5-10%). Scale in with subsequent buy_add rules. Also include trend-following entry: `close > MA(close,50) AND MACD() > 0 AND volume > MA(volume,20)*1.5`.
 
@@ -185,11 +196,16 @@ Be decisive and ground every conclusion in specific evidence from the analysts.
                     if action in pct_from_md:
                         rule_dict["pct"] = pct_from_md[action]
                 # 从 action_detail 中提取百分比
+                # 🆕1 修复: 降至/降到/减至 → 1-pct（降至30% = 应卖70%）
                 ad = rule_dict.get("action_detail", "")
                 if rule_dict.get("pct", 0) == 0 and ad:
                     pct_match = re.search(r'(\d+)%', ad)
                     if pct_match:
-                        rule_dict["pct"] = float(pct_match.group(1)) / 100.0
+                        raw_pct = float(pct_match.group(1)) / 100.0
+                        if (rule_dict.get("action", "") in ("sell_pct", "reduce_position", "downgrade")
+                                and re.search(r'降至|降到|减至', ad)):
+                            raw_pct = 1.0 - raw_pct
+                        rule_dict["pct"] = raw_pct
 
         if not trading_rules_structured:
             logging.getLogger(__name__).warning(
@@ -200,7 +216,9 @@ Be decisive and ground every conclusion in specific evidence from the analysts.
             # ★ 两阶段 Fallback: 主调用无规则时，用精简 prompt + function_calling 单独生成
             try:
                 summary = final_trade_decision_md[:3000]
-                rules_prompt = f"""Investment Decision for 000423 东阿阿胶:
+                ticker = state.get("company_of_interest", "000423")
+                name = state.get("stock_name", ticker)
+                rules_prompt = f"""Investment Decision for {ticker} {name}:
 
 {summary}
 
@@ -254,11 +272,16 @@ CRITICAL: For sell_pct and buy_add, action_detail MUST contain a percentage like
                                 "priority": r.priority,
                             }
                             # ★ 从 action_detail 提取 pct
+                            # 🆕1 修复: 降至/降到/减至 → 1-pct
                             pct = 0.0
                             ad = r.action_detail or ""
                             pm = _re.search(r'(\d+)%', ad)
                             if pm:
-                                pct = float(pm.group(1)) / 100.0
+                                raw_pct = float(pm.group(1)) / 100.0
+                                if (r.action.value in ("sell_pct", "reduce_position", "downgrade")
+                                        and _re.search(r'降至|降到|减至', ad)):
+                                    raw_pct = 1.0 - raw_pct
+                                pct = raw_pct
                             elif r.action.value in ("sell_pct", "buy_add"):
                                 pct = 0.3  # 默认 30%
                             rule_dict["pct"] = pct

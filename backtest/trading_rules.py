@@ -29,76 +29,77 @@ def eval_condition(condition: str, row: Dict[str, Any]) -> bool:
     示例: "close < 54.95 and volume > MA(volume,20)*1.2"
     """
     # 构建变量上下文（白名单，只暴露需要的字段和函数）
-    context = {
-        'close': row.get('close'),
-        'open': row.get('open'),
-        'high': row.get('high'),
-        'low': row.get('low'),
-        'volume': row.get('volume'),
-        'turnover': row.get('turnover'),
-        'pct_chg': row.get('pct_chg'),
-        'rsi_14': row.get('rsi_14'),
-        'rsi': row.get('rsi'),
-        'macd': row.get('macd'),
-        'macdh': row.get('macdh'),
-        'macds': row.get('macds'),
-        'boll_ub': row.get('boll_ub'),
-        'boll_lb': row.get('boll_lb'),
-        'boll': row.get('boll'),
-        'close_5_sma': row.get('close_5_sma'),
-        'close_10_sma': row.get('close_10_sma'),
-        'close_20_sma': row.get('close_20_sma'),
-        'close_50_sma': row.get('close_50_sma'),
-        'close_60_sma': row.get('close_60_sma'),
-        'close_120_sma': row.get('close_120_sma'),
-        'close_200_sma': row.get('close_200_sma'),
-        'ma5': row.get('close_5_sma'),
-        'ma10': row.get('close_10_sma'),
-        'ma20': row.get('close_20_sma'),
-        'ma50': row.get('close_50_sma'),
-        'ma60': row.get('close_60_sma'),
-        'kdj_k': row.get('kdj_k'),
-        'kdj_d': row.get('kdj_d'),
-        'kdj_j': row.get('kdj_j'),
-        'atr': row.get('atr'),
-        # 基本面字段（从fa_metrics注入）
-        'annual_roe': row.get('annual_roe'),
-        'annual_gross_margin': row.get('annual_gross_margin'),
-        'annual_net_margin': row.get('annual_net_margin'),
-        'annual_ocf_to_netprofit': row.get('annual_ocf_to_netprofit'),
-        'annual_debt_ratio': row.get('annual_debt_ratio'),
-        'annual_cash_coverage': row.get('annual_cash_coverage'),
-        'annual_revenue_growth': row.get('annual_revenue_growth'),
-        'annual_profit_growth': row.get('annual_profit_growth'),
-        'annual_dividend_payout': row.get('annual_dividend_payout'),
-        'annual_current_ratio': row.get('annual_current_ratio'),
-        'annual_interest_coverage': row.get('annual_interest_coverage'),
-        'quarter_roe': row.get('quarter_roe'),
-        'quarter_gross_margin': row.get('quarter_gross_margin'),
-        'quarter_net_margin': row.get('quarter_net_margin'),
-        'quarter_ocf_to_netprofit': row.get('quarter_ocf_to_netprofit'),
-        'quarter_debt_ratio': row.get('quarter_debt_ratio'),
-        'quarter_revenue_growth': row.get('quarter_revenue_growth'),
-        'quarter_profit_growth': row.get('quarter_profit_growth'),
-        'quarter_dividend_payout': row.get('quarter_dividend_payout'),
-        'quarter_current_ratio': row.get('quarter_current_ratio'),
-        'quarter_interest_coverage': row.get('quarter_interest_coverage'),
-    }
+    # ★ None → NaN: 确保所有缺失/为 None 的字段不会触发 '>' not supported
+    #   between instances of 'NoneType' and 'int'。 NaN 参与任何比较运算符
+    #   均返回 False（符合"未知=不触发规则"的语义）。
+    _nan = float('nan')
 
-    # 注册函数
+    def _g(key):
+        val = row.get(key)
+        return _nan if val is None else val
+
+    _CONTEXT_FIELDS = [
+        'close', 'open', 'high', 'low', 'volume', 'turnover', 'pct_chg',
+        'rsi_14', 'rsi', 'macd', 'macdh', 'macds',
+        'boll_ub', 'boll_lb', 'boll',
+        'close_5_sma', 'close_10_sma', 'close_20_sma', 'close_50_sma',
+        'close_60_sma', 'close_120_sma', 'close_200_sma', 'close_250_sma',
+        'volume_5_sma', 'volume_10_sma', 'volume_20_sma',
+        'kdj_k', 'kdj_d', 'kdj_j', 'atr',
+        # 基本面字段（从fa_metrics注入）
+        'annual_roe', 'annual_gross_margin', 'annual_net_margin',
+        'annual_ocf_to_netprofit', 'annual_debt_ratio', 'annual_cash_coverage',
+        'annual_revenue_growth', 'annual_profit_growth', 'annual_dividend_payout',
+        'annual_current_ratio', 'annual_interest_coverage',
+        'quarter_roe', 'quarter_gross_margin', 'quarter_net_margin',
+        'quarter_ocf_to_netprofit', 'quarter_debt_ratio',
+        'quarter_revenue_growth', 'quarter_profit_growth', 'quarter_dividend_payout',
+        'quarter_current_ratio', 'quarter_interest_coverage',
+    ]
+    context = {k: _g(k) for k in _CONTEXT_FIELDS}
+    # MA 别名
+    context['ma5'] = _g('close_5_sma')
+    context['ma10'] = _g('close_10_sma')
+    context['ma20'] = _g('close_20_sma')
+    context['ma50'] = _g('close_50_sma')
+    context['ma60'] = _g('close_60_sma')
+    context['ma120'] = _g('close_120_sma')
+    context['ma200'] = _g('close_200_sma')
+    context['ma250'] = _g('close_250_sma')
+
+    # 注册函数（缺数据时返回 NaN 而非 None — NaN 比较恒 False，不抛异常）
     def MA(field, period: int = 20):
-        """N日移动平均。优先用预计算字段，否则从row取。"""
-        field_str = str(field).lower() if field else ""
+        """N日移动平均。优先用预计算字段；缺列时用 _df/_idx 现场计算；
+        禁止回退到当日原始值（避免静默失效）。
+        """
+        field_str = str(field).lower().strip() if field else ""
         period_int = int(period) if period else 20
+        # 第1层：尝试从预计算 SMA 列读取
         if field_str in ('close',):
             col = f'close_{period_int}_sma'
             val = row.get(col)
             if val is not None:
                 return float(val)
-        val = row.get(field_str) if field_str else None
+        # 第2层：通用 SMA 列查找（如 volume_5_sma）
+        col = f'{field_str}_{period_int}_sma'
+        val = row.get(col)
         if val is not None:
             return float(val)
-        return None
+        # 第3层：用 _df/_idx 现场计算
+        df = row.get('_df')
+        idx = row.get('_idx')
+        if df is not None and idx is not None and idx >= period_int - 1:
+            try:
+                col_data = df[field_str].astype(float)
+                return float(col_data.iloc[idx - period_int + 1 : idx + 1].mean())
+            except (KeyError, IndexError, TypeError, ValueError):
+                pass
+        # 回退：日志告警并返回 NaN（绝不返回当日原始值，该行为曾导致规则静默失效）
+        logger.warning(
+            f"[MA] Cannot compute MA({field_str},{period_int}): "
+            f"SMA column missing and _df/_idx unavailable. Returning NaN."
+        )
+        return _nan
 
     def RSI(period: int = 14):
         """RSI指标。优先用预计算字段。"""
@@ -109,31 +110,74 @@ def eval_condition(condition: str, row: Dict[str, Any]) -> bool:
         val = row.get('rsi')
         if val is not None:
             return float(val)
-        return None
+        return _nan
 
     def BOLL(period: int = 20):
         val = row.get('boll')
         if val is not None:
             return float(val)
-        return None
+        return _nan
 
     def BOLL_UPPER(period: int = 20):
         val = row.get('boll_ub')
         if val is not None:
             return float(val)
-        return None
+        return _nan
 
     def BOLL_LOWER(period: int = 20):
         val = row.get('boll_lb')
         if val is not None:
             return float(val)
-        return None
+        return _nan
 
     def ATR(period: int = 14):
         val = row.get('atr')
         if val is not None:
             return float(val)
-        return None
+        return _nan
+
+    # 2-I 修复: CROSSOVER/CROSSUNDER 金叉/死叉检测
+    def CROSSOVER(short_val, long_val) -> bool:
+        """short 上穿 long（金叉）: short_today > long_today AND short_prev <= long_prev"""
+        df = row.get('_df')
+        idx = row.get('_idx')
+        if df is None or idx is None or idx < 1:
+            return False
+        try:
+            # 获取当日值
+            sv = float(short_val) if not callable(short_val) else short_val()
+            lv = float(long_val) if not callable(long_val) else long_val()
+            if sv <= lv:
+                return False
+            # 获取前日值（用 _df.iloc[idx-1]）
+            prev_row = df.iloc[idx - 1]
+            if callable(short_val):
+                # 创建临时 row 来求前日值（简化：直接用 prev_row dict）
+                # 对于函数形式，回退到保守判断
+                return prev_row[row.get('_close', 'close')] <= prev_row[row.get('_close', 'close')]
+            sv_prev = float(prev_row.get(str(short_val), 0)) if not callable(short_val) else short_val()
+            lv_prev = float(prev_row.get(str(long_val), 0)) if not callable(long_val) else long_val()
+            return sv_prev <= lv_prev
+        except Exception:
+            return False
+
+    def CROSSUNDER(short_val, long_val) -> bool:
+        """short 下穿 long（死叉）: short_today < long_today AND short_prev >= long_prev"""
+        df = row.get('_df')
+        idx = row.get('_idx')
+        if df is None or idx is None or idx < 1:
+            return False
+        try:
+            sv = float(short_val) if not callable(short_val) else short_val()
+            lv = float(long_val) if not callable(long_val) else long_val()
+            if sv >= lv:
+                return False
+            prev_row = df.iloc[idx - 1]
+            sv_prev = float(prev_row.get(str(short_val), 0)) if not callable(short_val) else short_val()
+            lv_prev = float(prev_row.get(str(long_val), 0)) if not callable(long_val) else long_val()
+            return sv_prev >= lv_prev
+        except Exception:
+            return False
 
     context['MA'] = MA
     context['RSI'] = RSI
@@ -141,6 +185,8 @@ def eval_condition(condition: str, row: Dict[str, Any]) -> bool:
     context['BOLL_UPPER'] = BOLL_UPPER
     context['BOLL_LOWER'] = BOLL_LOWER
     context['ATR'] = ATR
+    context['CROSSOVER'] = CROSSOVER
+    context['CROSSUNDER'] = CROSSUNDER
     context['MAX'] = max
     context['MIN'] = min
     context['ABS'] = abs
@@ -223,6 +269,20 @@ def eval_condition(condition: str, row: Dict[str, Any]) -> bool:
     condition_clean = re.sub(r'\bBOLL_LOWER\s*\(\s*\d+\s*\)', 'boll_lb', condition_clean, flags=re.IGNORECASE)
 
     try:
+        # 2.10 修复：NOT + NaN 语义保护
+        # 条件含 NOT 时，检查其引用的 context 字段是否有 NaN。
+        # 解析 MA(field,period) → 预期 key: {field}_{period}_sma
+        if 'not' in condition_clean:
+            ma_calls = re.findall(r"MA\('(\w+)'\s*,\s*(\d+)\)", condition_clean)
+            check_keys = {f"{field}_{period}_sma" for field, period in ma_calls}
+            # 也检查直接引用的字段（如 close, open）和 RSI 等
+            direct_fields = re.findall(r'\b(close|open|high|low|volume)\b', condition_clean)
+            check_keys.update(direct_fields)
+            for key in check_keys:
+                val = context.get(key)
+                if isinstance(val, float) and val != val:  # NaN
+                    logger.debug(f"[eval_condition] Skipping NOT rule: field '{key}' is NaN")
+                    return False
         result = eval(condition_clean, {"__builtins__": {}}, context)
         return bool(result)
     except ZeroDivisionError as e:
@@ -516,6 +576,9 @@ class TradingRule:
     pct: float = 0.0
     source_sentence: str = ""
     enabled: bool = True
+    max_triggers: int = 0   # 2-K: 最大触发次数（0=无限制）
+    since_date: str = ""    # 2.6: 规则生效日 YYYY-MM-DD
+    expires_after_days: int = 0  # 2.6: 规则过期天数（0=永不过期）
 
     def evaluate_all(self, row: Dict[str, Any]) -> bool:
         """判断条件是否满足。直接用 eval_condition 执行原文。
@@ -623,8 +686,15 @@ class RuleParser:
         re.IGNORECASE,
     )
 
-    def parse(self, pm_text: str, **kwargs) -> List[TradingRule]:
-        """解析入口。先尝试 WHEN/THEN 格式，再尝试 IF/THEN 格式。"""
+    def parse(self, pm_text: str, price_cond=None, direction=None, **kwargs) -> List[TradingRule]:
+        """解析入口。先尝试 WHEN/THEN 格式，再尝试 IF/THEN 格式。
+        
+        Args:
+            pm_text: PM 输出文本
+            price_cond: PriceCondition 对象（可选，预留扩展）
+            direction: TradeDirection 对象（可选，预留扩展）
+            **kwargs: 额外关键字参数（如 use_llm）
+        """
         rules = self._sql_extract(pm_text)
         if not rules:
             rules = self._structured_extract(pm_text)

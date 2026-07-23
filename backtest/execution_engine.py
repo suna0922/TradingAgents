@@ -78,6 +78,9 @@ class ExecutionEngine:
         pct_chg = float(row.get("pct_chg", 0))
         open_price = float(row["open"])
 
+        # ── 3-A T+1: 新交易日，昨日买入的持仓已结算 ────
+        portfolio.shares_settling = 0
+
         # ── 前置检查 ───────────────────────────────────────────
 
         # 1. 停牌检测
@@ -87,8 +90,9 @@ class ExecutionEngine:
             )
 
         # 2. 涨跌停检测（无法买入/卖出）
-        at_limit_up = self._is_limit_up(pct_chg)
-        at_limit_down = self._is_limit_down(pct_chg)
+        # 3-B 修复：按板块区分涨跌停比例
+        at_limit_up = self._is_limit_up_sym(pct_chg, self.config.symbol)
+        at_limit_down = self._is_limit_down_sym(pct_chg, self.config.symbol)
 
         # ── 核心决策逻辑 ───────────────────────────────────────
 
@@ -127,12 +131,16 @@ class ExecutionEngine:
         if action == "HOLD":
             if has_position:
                 # ── 持仓中：优先检查卖出信号 ────────────────────────
-                action, action_price, action_shares, exit_reason = (
-                    self._check_exit_signals(
-                        portfolio, decision, close, low, high,
-                        open_price, at_limit_down, row, df, idx
+                # 3-B 修复：跌停日禁止卖出（封板无法成交）
+                if at_limit_down:
+                    logger.debug(f"[SELL] Blocked by limit-down @ {date_str}")
+                else:
+                    action, action_price, action_shares, exit_reason = (
+                        self._check_exit_signals(
+                            portfolio, decision, close, low, high,
+                            open_price, at_limit_down, row, df, idx
+                        )
                     )
-                )
             else:
                 # ── 空仓中：检查买入信号 ────────────────────────────
                 if not at_limit_up:
@@ -227,6 +235,11 @@ class ExecutionEngine:
         for rule in decision.trading_rules:
             if not rule.enabled:
                 continue
+            
+            # 2.6: 自动禁用过期规则
+            if ExecutionEngine._is_rule_expired(rule, date_str):
+                rule.enabled = False
+                continue
 
             if rule.evaluate_all(row_dict):
                 triggered_rules.append(rule.name)
@@ -298,19 +311,20 @@ class ExecutionEngine:
             return ("SELL", price, shares, reason)
 
         elif action == RuleAction.SELL_PCT:
-            # 按 pct 减仓
+            # 按 pct 减仓（直接取结构化字段，无正则兜底）
             if rule.pct > 0:
                 reduce_pct = rule.pct
             else:
-                # PM 未指定 pct，从 action_detail 或 source_sentence 中尝试提取
-                reduce_pct = self._extract_pct_from_text(rule.source_sentence) or 0.3  # 默认保守减仓30%
-                logger.warning(f"[RULE] SELL_PCT pct not specified, using default {reduce_pct:.0%} for rule: {rule.name}")
+                logger.error(f"[RULE] SELL_PCT triggered but pct=0 for rule: {rule.name}. "
+                             f"Skipping — PM must provide pct in TradingRuleItem.")
+                return ("HOLD", 0.0, 0, reason)
             shares = self._calc_reduce_shares(portfolio, close, pct=reduce_pct)
             return ("SELL", price, shares, reason)
 
         elif action == RuleAction.STOP_LOSS:
             # 止损出场（用止损价或 close）
             # 从 condition_str 中提取止损阈值: "close < 48.50"
+            # 注：跌停日卖出已被 execute() 门控阻止，此处 sell_price 有保护
             sl_value = self._extract_price_from_condition(rule.condition_str, default=close)
             sell_price = max(sl_value, open_price) if at_limit_down else sl_value
             shares = portfolio.shares
@@ -318,8 +332,9 @@ class ExecutionEngine:
 
         elif action == RuleAction.TAKE_PROFIT:
             # 止盈出场
+            # 3-B 修复: 止盈门控应检查涨停（非跌停）
             tp_value = self._extract_price_from_condition(rule.condition_str, default=close)
-            sell_price = min(tp_value, open_price) if at_limit_down else tp_value
+            sell_price = min(tp_value, open_price) if at_limit_up else tp_value
             shares = portfolio.shares
             return ("SELL", sell_price, shares, reason)
 
@@ -383,7 +398,11 @@ class ExecutionEngine:
         for pat in patterns:
             match = re.search(pat, text)
             if match:
-                return float(match.group(1)) / 100.0
+                raw_pct = float(match.group(1)) / 100.0
+                # 1-B 修复：降至/降到/减至 → 需要卖 (1-N)，而非 N
+                if re.search(r'降至|降到|减至', text):
+                    return 1.0 - raw_pct
+                return raw_pct
         return None
 
     @staticmethod
@@ -419,7 +438,9 @@ class ExecutionEngine:
         sell_shares = portfolio.shares - target_shares
         if sell_shares <= 0:
             return 0
-        return max(100, (sell_shares // 100) * 100)  # 最少卖1手
+        # 按手取整，但不超过实际持股，防止小仓位放大
+        rounded = max(100, (sell_shares // 100) * 100)
+        return min(sell_shares, rounded)
 
     def _calc_buy_shares(
         self, portfolio: PortfolioState, close: float, rule: TradingRule,
@@ -445,9 +466,9 @@ class ExecutionEngine:
         if rule.pct > 0:
             buy_pct = rule.pct
         else:
-            # PM 未指定 pct，从 action_detail 或 source_sentence 中尝试提取
-            buy_pct = self._extract_pct_from_text(rule.source_sentence) or 0.2  # 默认保守加仓20%
-            logger.warning(f"[RULE] BUY_ADD pct not specified, using default {buy_pct:.0%} for rule: {rule.name}")
+            logger.error(f"[RULE] BUY_ADD triggered but pct=0 for rule: {rule.name}. "
+                         f"Skipping — PM must provide pct in TradingRuleItem.")
+            return 0
         available = portfolio.cash * buy_pct
 
         cost_rate = (self.config.commission_rate + self.config.slippage_pct)
@@ -507,9 +528,22 @@ class ExecutionEngine:
                         f"(limit={cond.stop_loss})")
             return ("SELL", sell_price, shares, "stop_loss")
 
+        # 1b. 3-C 修复：百分比止损（防御前复权导致的绝对价格偏移）
+        # 当 PM 设了止损但绝对价因前复权向下偏移而不再有效时，
+        # 百分比止损作为兜底。
+        if entry_price > 0:
+            stop_pct = getattr(cond, 'stop_loss_pct', 0.08)
+            pnl_pct = (close - entry_price) / entry_price
+            if pnl_pct <= -stop_pct:
+                sell_price = close
+                logger.info(f"[EXIT] Percentage stop-loss triggered @ {sell_price} "
+                            f"(pnl={pnl_pct:.2%}, threshold=-{stop_pct:.0%})")
+                return ("SELL", sell_price, shares, "stop_loss_pct")
+
         # 2. 固定止盈
         if cond.take_profit > 0 and high >= cond.take_profit:
-            sell_price = min(cond.take_profit, open_price) if at_limit_down else cond.take_profit
+            # 3-B 修复：止盈门控应使用涨停检测（非跌停）
+            sell_price = min(cond.take_profit, open_price) if at_limit_up else cond.take_profit
             logger.info(f"[EXIT] Take-profit triggered @ {sell_price} "
                         f"(target={cond.take_profit})")
             return ("SELL", sell_price, shares, "take_profit")
@@ -646,7 +680,10 @@ class ExecutionEngine:
         target_investment = total_value * target_pct
 
         # 考虑交易成本后的可用资金
+        # 3-D 修复：买入端加过户费
         cost_rate = (self.config.commission_rate + self.config.slippage_pct)
+        if self.config.is_sh_market:
+            cost_rate += self.config.transfer_fee_rate
         available = portfolio.cash / (1 + cost_rate)
 
         # 以收盘价计算（或用区间上限），优先用区间上限（更保守）
@@ -777,12 +814,14 @@ class ExecutionEngine:
         if shares <= 0 or price <= 0:
             return portfolio
 
-        # 计算交易成本
+        # 计算交易成本（含过户费）
         gross_value = shares * price
         slippage_cost = gross_value * self.config.slippage_pct
         commission = max(gross_value * self.config.commission_rate, self.config.min_commission)
+        # 3-D 修复：买入端补过户费
+        transfer_fee = gross_value * self.config.transfer_fee_rate if self.config.is_sh_market else 0.0
 
-        total_cost = gross_value + slippage_cost + commission
+        total_cost = gross_value + slippage_cost + commission + transfer_fee
 
         if total_cost > portfolio.cash:
             # 资金不足，调整股数
@@ -795,16 +834,23 @@ class ExecutionEngine:
             gross_value = shares * price
             slippage_cost = gross_value * self.config.slippage_pct
             commission = max(gross_value * self.config.commission_rate, self.config.min_commission)
-            total_cost = gross_value + slippage_cost + commission
+            # 3-D 修复：调整股数后也补过户费
+            transfer_fee = gross_value * self.config.transfer_fee_rate if self.config.is_sh_market else 0.0
+            total_cost = gross_value + slippage_cost + commission + transfer_fee
 
         portfolio.cash -= total_cost
         portfolio.shares += shares
+        # 3-A T+1: 标记今日买入的股数为待结算
+        portfolio.shares_settling += shares
 
         # 记录交易
+        # 3-H 修复: entry_price 含买入侧成本（滑点+佣金+过户费）
+        buy_cost_per_share = (slippage_cost + commission + transfer_fee) / shares if shares > 0 else 0
+        all_in_entry_price = price + buy_cost_per_share
         trade = TradeRecord(
             entry_date=date_str,
             exit_date="",  # 尚未平仓
-            entry_price=price,
+            entry_price=all_in_entry_price,
             exit_price=0.0,
             shares=shares,
             direction="BUY",
@@ -830,8 +876,15 @@ class ExecutionEngine:
         if shares <= 0 or price <= 0 or portfolio.shares <= 0:
             return portfolio, exit_reason
 
-        # 实际卖出数量不能超过持有量
-        shares = min(shares, portfolio.shares)
+        # 3-A T+1: 检查是否有可卖出的股份（排除今日买入）
+        if shares <= 0 or price <= 0:
+            return portfolio, exit_reason
+        available = max(0, portfolio.shares - portfolio.shares_settling)
+        if available <= 0:
+            logger.warning(f"[SELL] Cannot sell: 0 shares available "
+                           f"(total={portfolio.shares}, settling={portfolio.shares_settling})")
+            return portfolio, exit_reason
+        shares = min(shares, available)
 
         # 计算收入和成本
         gross_income = shares * price
@@ -877,20 +930,66 @@ class ExecutionEngine:
     # ── A 股交易规则辅助 ─────────────────────────────────────────
 
     @staticmethod
+    def _is_rule_expired(rule: "TradingRule", date_str: str) -> bool:
+        """2.6: 检查规则是否已过期。返回 True 表示应禁用。"""
+        if not rule.since_date or rule.expires_after_days <= 0:
+            return False
+        try:
+            from datetime import datetime as _dt
+            since = _dt.strptime(rule.since_date, "%Y-%m-%d")
+            now = _dt.strptime(date_str, "%Y-%m-%d")
+            return (now - since).days >= rule.expires_after_days
+        except Exception:
+            return False
+
+    @staticmethod
     def _is_suspended(volume: float) -> bool:
         """停牌检测：成交量 = 0 视为停牌。"""
         return volume == 0 or pd.isna(volume)
 
+    def _get_limit_pct(self, symbol: str = "") -> float:
+        """🆕2 修复：按板块/代码前缀 + 实际 ST 状态确定涨跌停比例。
+        
+        - 主板 (6xxxxx/0xxxxx/3xxxxx 除 300/688): 10%
+        - 创业板 300xxx: 20%
+        - 科创板 688xxx: 20%
+        - ST 股（从 config.symbol_stock_name 检测）: 5%
+        """
+        # 🆕2: 优先检查配置中注入的真实股票名称（如 "*ST东阿"）
+        name = getattr(self.config, 'symbol_stock_name', '')
+        if name and ('ST' in name or '*ST' in name):
+            return 5.0
+        s = str(symbol or self.config.symbol).strip().upper()
+        if s.startswith('300'):
+            return 20.0
+        if s.startswith('688'):
+            return 20.0
+        return 10.0
+
+    def _is_limit_up_sym(self, pct_chg: float, symbol: str = "") -> bool:
+        """🆕2 修复：按板块确定涨停检测阈值。"""
+        if pd.isna(pct_chg):
+            return False
+        limit = self._get_limit_pct(symbol) - 0.1
+        return pct_chg >= limit
+
+    def _is_limit_down_sym(self, pct_chg: float, symbol: str = "") -> bool:
+        """🆕2 修复：按板块确定跌停检测阈值。"""
+        if pd.isna(pct_chg):
+            return False
+        limit = -(self._get_limit_pct(symbol) - 0.1)
+        return pct_chg <= limit
+
     @staticmethod
     def _is_limit_up(pct_chg: float) -> bool:
-        """涨停检测（≥9.9% 视为涨停）。"""
+        """涨停检测（≥9.9% 视为涨停）— 保留向后兼容，推荐用 _is_limit_up_sym。"""
         if pd.isna(pct_chg):
             return False
         return pct_chg >= 9.9
 
     @staticmethod
     def _is_limit_down(pct_chg: float) -> bool:
-        """跌停检测（≤ -9.9% 视为跌停）。"""
+        """跌停检测（≤ -9.9% 视为跌停）— 保留向后兼容，推荐用 _is_limit_down_sym。"""
         if pd.isna(pct_chg):
             return False
         return pct_chg <= -9.9

@@ -18,7 +18,7 @@ def create_aggressive_debator(llm):
 
         trader_decision = state["trader_investment_plan"]
         instrument_context = build_instrument_context(
-            state["company_of_interest"], stock_name=state.get("stock_name", "")
+            state["company_of_interest"], stock_name=state.get("stock_name", ""), curr_date=state.get("trade_date")
         )
         master_methodology = get_master_methodology("aggressive_debator")
 

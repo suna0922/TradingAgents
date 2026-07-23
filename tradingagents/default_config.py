@@ -29,6 +29,10 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MASTER_TRADER":        "master_trader",
     "TRADINGAGENTS_MASTER_PM":            "master_pm",
     "TRADINGAGENTS_MASTER_RM":            "master_rm",
+    "TRADINGAGENTS_MASTER_FUNDAMENTALS":  "master_fundamentals",
+    "TRADINGAGENTS_MASTER_MARKET":        "master_market",
+    "TRADINGAGENTS_MASTER_NEWS":          "master_news",
+    "TRADINGAGENTS_MASTER_SENTIMENT":     "master_sentiment",
 }
 
 
@@ -151,8 +155,32 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "aggressive_debator":   "default",   # Options: soros, lynch, ptj
         "conservative_debator": "default",   # Options: graham, marks, klarman
         "neutral_debator":      "default",   # Options: dalio, munger, marks
-        "trader":               "default",   # Options: ptj
+        "trader":               "default",   # Options: ptj, livermore, raschke
         "portfolio_manager":    "default",   # Options: dalio, buffett, marks, ptj
-        "research_manager":     "default",   # Options: munger, marks, dalio
+        "research_manager":     "default",   # Options: munger, marks, dalio, bogle
+        "fundamentals_analyst": "default",   # Options: buffett, graham, fisher, lynch
+        "market_analyst":       "default",   # Options: livermore, ptj, raschke, dalio
+        "news_analyst":         "default",   # Options: soros, ackman, wood, tepper
+        "sentiment_analyst":    "default",   # Options: soros
+    },
+    # ── Custom Theory Injection (per role) ──
+    # Same "角色定义 + {自定义理论}" contract as master_config, but the slot is
+    # filled with the USER'S OWN free-text investment thesis instead of a preset
+    # master.  A non-empty entry here OVERRIDES master_config for that role.
+    # Example: {"bull_researcher": "我认为只看自由现金流和分红率，忽略市盈率……"}
+    # Leave empty ("") to fall back to master_config / no injection.
+    "custom_theory_config": {
+        "bull_researcher":      "",
+        "bear_researcher":      "",
+        "aggressive_debator":   "",
+        "conservative_debator": "",
+        "neutral_debator":      "",
+        "trader":               "",
+        "portfolio_manager":    "",
+        "research_manager":     "",
+        "fundamentals_analyst": "",
+        "market_analyst":       "",
+        "news_analyst":         "",
+        "sentiment_analyst":    "",
     },
 })

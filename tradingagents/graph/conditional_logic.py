@@ -50,22 +50,33 @@ class ConditionalLogic:
         return "Msg Clear Fundamentals"
 
     def should_continue_debate(self, state: AgentState) -> str:
-        """Determine if debate should continue."""
-
+        """Determine if debate should continue.
+        
+        Debate termination now routes through Numeric Check nodes
+        (Bull → Bear, chained) before reaching Research Manager,
+        ensuring both sides' numeric claims are validated.
+        """
         if (
             state["investment_debate_state"]["count"] >= 2 * self.max_debate_rounds
         ):  # 3 rounds of back-and-forth between 2 agents
-            return "Research Manager"
+            # ★ Route through numeric validation chain before Research Manager
+            return "Numeric Check Bull"
         if state["investment_debate_state"]["current_response"].startswith("Bull"):
             return "Bear Researcher"
         return "Bull Researcher"
 
     def should_continue_risk_analysis(self, state: AgentState) -> str:
-        """Determine if risk analysis should continue."""
+        """Determine if risk analysis should continue.
+        
+        Risk debate termination now routes through Numeric Check Risk
+        before reaching Portfolio Manager, ensuring all risk analyst
+        numeric claims are validated.
+        """
         if (
             state["risk_debate_state"]["count"] >= 3 * self.max_risk_discuss_rounds
         ):  # 3 rounds of back-and-forth between 3 agents
-            return "Portfolio Manager"
+            # ★ Route through numeric validation before Portfolio Manager
+            return "Numeric Check Risk"
         if state["risk_debate_state"]["latest_speaker"].startswith("Aggressive"):
             return "Conservative Analyst"
         if state["risk_debate_state"]["latest_speaker"].startswith("Conservative"):

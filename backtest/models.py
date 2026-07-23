@@ -24,6 +24,7 @@ class TradeDirection(str, Enum):
 class PriceCondition:
     """PM 决策中的价格约束。"""
     stop_loss: float = 0.0                    # 止损价（元）
+    stop_loss_pct: float = 0.08              # 3-C: 百分比止损（防御前复权偏移），默认 -8%
     take_profit: float = 0.0                  # 止盈价（元）
     buy_range: Optional[Tuple[float, float]] = None  # 买入区间 (low, high)
     trailing_stop_pct: float = 0.12           # 移动止损百分比（如 0.12 = 12%）
@@ -142,17 +143,21 @@ class PortfolioState:
     """组合状态（被 BacktestEngine 维护）。"""
     cash: float = 1_000_000.0
     shares: int = 0
+    shares_settling: int = 0                       # 3-A T+1: 今日买入不可当日卖出
     current_date: str = ""                          # YYYY-MM-DD
     active_decision: Optional[WeeklyDecision] = None  # 当前生效的决策
     last_decision_executed_date: str = ""           # 最后一次执行决策的日期（防止重复执行）
     state_history: List[DailyState] = field(default_factory=list)
     trade_history: List[TradeRecord] = field(default_factory=list)
+    # 2-K: 规则触发计数器 {rule_name: trigger_count}
+    rule_trigger_counts: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
 class BacktestConfig:
     """回测配置参数。"""
     symbol: str = "000960"                         # 股票代码
+    symbol_stock_name: str = ""                    # 🆕2: 股票名称（如 "*ST东阿"），用于 ST 检测
     start_date: str = "2024-01-02"                  # 回测开始日
     end_date: str = "2026-05-20"                    # 回测结束日
     initial_cash: float = 1_000_000.0               # 初始资金
@@ -166,16 +171,16 @@ class BacktestConfig:
 
     # L1 触发条件
     price_change_threshold: float = 0.10            # 价格波动 ≥10% 触发重决策
-    decision_stale_days: int = 15                   # 超过 15 天保底刷新决策
+    decision_stale_days: int = 25                   # 超过 25 天保底刷新决策（对齐预测系统）
 
     # FA 频率控制
     fa_quarterly: bool = True                       # 仅每季度跑 FA
 
-    # A股交易成本
+    # A股交易成本（2023-08 减半后费率）
     slippage_pct: float = 0.001                     # 滑点 0.1%
     commission_rate: float = 0.0003                 # 佣金 万三
-    stamp_duty_rate: float = 0.001                  # 印花税 千一（仅卖出）
-    transfer_fee_rate: float = 0.00002             # 过户费 万0.2（上海）
+    stamp_duty_rate: float = 0.0005                 # 印花税 万五（仅卖出，2023-08 减半）
+    transfer_fee_rate: float = 0.00001             # 过户费 万0.1（上海，2022-04 调整）
     min_commission: float = 5.0                     # 最低佣金 5 元
 
     # 输出

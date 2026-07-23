@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import os
 import sys
 import time
@@ -60,6 +61,7 @@ from backtest.models import (
 from backtest.trading_rules import TradingRule, RuleAction
 from backtest.execution_engine import ExecutionEngine
 from backtest.data_layer import DataLayer
+from backtest.fa_cache import flatten_dual_period
 
 # ── Logging ───────────────────────────────────────────────────────
 logging.basicConfig(
@@ -120,15 +122,8 @@ def convert_structured_rules(structured_rules: List[Dict]) -> List[TradingRule]:
             if priority == 50 and rule_type in priority_map:
                 priority = priority_map[rule_type]
 
-            # 解析 pct
+            # 解析 pct（直接取结构化字段，无正则兜底）
             pct = r_data.get("pct", 0.0)
-            if pct == 0.0:
-                action_detail = r_data.get("action_detail", "")
-                if action_detail:
-                    import re
-                    m = re.search(r"(\d+)%", action_detail)
-                    if m:
-                        pct = float(m.group(1)) / 100.0
 
             rule = TradingRule(
                 name=f"[{rule_type}] {condition[:40]}",
@@ -154,7 +149,11 @@ def build_weekly_decision_from_rules(
     pm_raw_output: str = "",
     decision_date: str = "",
 ) -> WeeklyDecision:
-    """从 structured_rules 构建 WeeklyDecision 供 ExecutionEngine 消费。"""
+    """从 structured_rules 构建 WeeklyDecision 供 ExecutionEngine 消费。
+    
+    X9 修复: 从 trading_rules 中提取 PM 的 STOP_LOSS/TAKE_PROFIT 规则，
+    将止损/止盈价格填入 PriceCondition，避免 stop_loss=0 导致裸奔持仓。
+    """
     # Map PM signal to TradeDirection (case-insensitive)
     signal_lower = signal_raw.lower()
     if any(kw in signal_lower for kw in ("buy", "overweight")):
@@ -163,12 +162,31 @@ def build_weekly_decision_from_rules(
         direction = TradeDirection.SELL
     else:
         direction = TradeDirection.HOLD
+    
+    # ★ X9 修复：从 trading_rules 提取止损/止盈价
+    stop_loss = 0.0
+    take_profit = 0.0
+    
+    for rule in trading_rules:
+        if not rule.enabled:
+            continue
+        if rule.action == RuleAction.STOP_LOSS:
+            # 从条件中提取止损价: "close < 50.00" → 50.00
+            price = _extract_price_from_condition(rule.condition_str)
+            if price > 0:
+                stop_loss = price
+        elif rule.action == RuleAction.TAKE_PROFIT:
+            # 从条件中提取止盈价: "close > 60.00" → 60.00
+            price = _extract_price_from_condition(rule.condition_str)
+            if price > 0:
+                take_profit = price
+    
     return WeeklyDecision(
         direction=direction,
         position_pct=-1,
         price_cond=PriceCondition(
-            stop_loss=0.0,  # 将由 ExecutionEngine 的 _safe_price_condition 兜底
-            take_profit=0.0,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
         ),
         technical_triggers=TechnicalTriggers(),
         fundamental_guards=FundamentalGuards(),
@@ -180,6 +198,26 @@ def build_weekly_decision_from_rules(
         trading_rules=trading_rules,
         rules_parsed_ok=len(trading_rules) > 0,
     )
+
+
+def _extract_price_from_condition(condition_str: str) -> float:
+    """从条件字符串中提取数值价格。
+    
+    示例: "close < 50.00" → 50.00
+          "close > 60.50 and volume > MA(volume,20)" → 60.50
+          "high >= 45.00" → 45.00
+    """
+    import re
+    if not condition_str:
+        return 0.0
+    # 匹配比较运算符后的数值
+    m = re.search(r'[<>=!]+\s*([\d.]+)', condition_str)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+    return 0.0
 
 
 def _is_quarter_start(date_str: str, last_quarter_period: Optional[str]) -> Tuple[bool, str]:
@@ -241,6 +279,8 @@ class L1Analyzer:
         self.output_dir = output_dir
         # L1 分析缓存: {date_str: L1AnalysisResult}
         self._cache: Dict[str, L1AnalysisResult] = {}
+        # ★ 基本面报告缓存：full 分析时保存，quick 分析时复用
+        self._last_fundamentals_report: str = ""
 
     def run_full_analysis(self, symbol: str, date_str: str) -> L1AnalysisResult:
         """运行完整分析（fundamentals + market）—— 每季度一次。
@@ -271,14 +311,24 @@ class L1Analyzer:
         return result
 
     def run_quick_analysis(self, symbol: str, date_str: str) -> L1AnalysisResult:
-        """运行快速分析（market only）—— stale 或 price-change 触发。
+        """运行快速分析（缓存的 fundamentals_report + fresh market + 辩论 + PM）。
 
-        对齐 cli/main.py:
-          - TradingAgentsGraph(selected_analysts=["market"], config=..., debug=False)
-          - graph.propagate(symbol, date_str)
+        与 run_full_analysis 的区别：
+        - 不重新跑 fundamentals analyst（用上次 full 分析的缓存报告文本）
+        - market analyst 始终重跑（OHLCV 每日变化）
+        - 下游辩论和 PM 仍然完整执行
         """
-        logger.info(f"[L1-QUICK] {symbol} @ {date_str} | analysts=[market]")
-        return self._run_analysis(symbol, date_str, ["market"], deep_model=False)
+        logger.info(f"[L1-QUICK] {symbol} @ {date_str} | analysts=[market] (fundamentals from cache)")
+
+        result = self._run_analysis(symbol, date_str, ["market"], deep_model=False)
+
+        # ★ 注入缓存的基本面报告（上次 full_analysis 时保存的）
+        if self._last_fundamentals_report:
+            result.fundamentals_report = self._last_fundamentals_report
+            logger.info(f"[L1-QUICK] Injected cached fundamentals_report "
+                        f"({len(self._last_fundamentals_report)} chars)")
+
+        return result
 
     def _run_analysis(
         self,
@@ -305,8 +355,21 @@ class L1Analyzer:
         )
 
         # 执行 propagate() — 完全等同于 CLI 的 graph.propagate()
+        # 1-A 修复: 传入当前持仓状态，让 PM 知道实时仓位
+        pos_state = ""
+        if hasattr(self, 'portfolio') and self.portfolio:
+            p = self.portfolio
+            pos_value = p.shares * self.last_decision_price if self.last_decision_price > 0 else 0
+            total_value = p.cash + pos_value
+            pos_pct = pos_value / total_value * 100 if total_value > 0 else 0
+            pos_state = (
+                f"当前持仓: {p.shares}股 | "
+                f"仓位占比: {pos_pct:.1f}% | "
+                f"现金: ¥{p.cash:,.0f} | "
+                f"总资产: ¥{total_value:,.0f}"
+            )
         try:
-            state, signal = graph.propagate(symbol, date_str)
+            state, signal = graph.propagate(symbol, date_str, position_state=pos_state)
         except Exception as e:
             logger.error(f"[L1] propagate failed for {symbol} @ {date_str}: {e}")
             raise
@@ -319,13 +382,9 @@ class L1Analyzer:
         for rule in trading_rules:
             logger.info(f"  - {rule.name} ({rule.action.value}, priority={rule.priority})")
 
-        # 提取基本面指标（季度分析时使用）
-        fa_metrics = state.get("fundamentals_structured", {})
-        # 确保 fa_metrics 是展平字典
-        if isinstance(fa_metrics, dict):
-            fa_flat = _flatten_fa_metrics(fa_metrics)
-        else:
-            fa_flat = {}
+        # 提取基本面指标 — 复用独立回测的 L1FinancialAnalyzerEnhanced.analyze_dual() 路径
+        # 确保键名与规则引擎期望的 annual_*/quarter_* 前缀一致
+        fa_flat = _extract_fa_metrics_via_l1(symbol, date_str)
 
         result = L1AnalysisResult(
             date=date_str,
@@ -408,7 +467,7 @@ class L1Analyzer:
 
 
 def _flatten_fa_metrics(metrics: Dict, prefix: str = "") -> Dict[str, float]:
-    """递归展平嵌套的基本面指标字典。"""
+    """递归展平嵌套的基本面指标字典。（已弃用 — 保留向后兼容）"""
     flat = {}
     for k, v in metrics.items():
         full_key = f"{prefix}_{k}" if prefix else k
@@ -417,6 +476,62 @@ def _flatten_fa_metrics(metrics: Dict, prefix: str = "") -> Dict[str, float]:
         elif isinstance(v, (int, float)):
             flat[full_key] = float(v)
     return flat
+
+
+# ── FA 指标缓存（按 symbol+reportPeriod 缓存 analyze_dual 结果） ──
+_fa_metrics_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def _extract_fa_metrics_via_l1(symbol: str, date_str: str) -> Dict[str, Any]:
+    """通过 L1FinancialAnalyzerEnhanced.analyze_dual() 提取结构化基本面指标。
+
+    复用独立回测（backtest/decision_engine.py）的同一路径，确保产出
+    带 annual_*/quarter_* 前缀的 50+ 字段，与规则引擎期望的键名一致。
+
+    Args:
+        symbol: 股票代码
+        date_str: 分析日期 YYYY-MM-DD（用于 look-ahead 过滤和缓存 key）
+
+    Returns:
+        展平后的 FA 指标字典，如 {"annual_roe": 22.5, "quarter_ocf_to_netprofit": 0.95, ...}
+        失败时返回空字典（不阻塞回测）。
+    """
+    # 确定当前报告期
+    from backtest.cache_manager import CacheManager
+    report_period = CacheManager.get_latest_fa_period(date_str)
+    if not report_period:
+        report_period = date_str[:7]  # fallback: YYYY-MM
+
+    cache_key = f"{symbol}_{report_period}"
+    if cache_key in _fa_metrics_cache:
+        logger.debug(f"[FA-L1] Cache hit: {cache_key} ({len(_fa_metrics_cache[cache_key])} metrics)")
+        return _fa_metrics_cache[cache_key]
+
+    try:
+        from tradingagents.l1.data_loader_fixed import get_stock_profile_safe
+        from tradingagents.l1.analyzer_l1_enhanced_complete import (
+            L1FinancialAnalyzerEnhanced,
+        )
+
+        logger.info(f"[FA-L1] Extracting structured metrics for {symbol} @ {report_period}")
+        profile = get_stock_profile_safe(symbol, analysis_date=date_str)
+        analyzer = L1FinancialAnalyzerEnhanced(debug=False)
+        dual_result = analyzer.analyze_dual(symbol, name=symbol, profile=profile)
+
+        metrics = flatten_dual_period(dual_result)
+        _fa_metrics_cache[cache_key] = metrics
+
+        logger.info(f"[FA-L1] Cached {len(metrics)} metrics for {cache_key}")
+        # 打印关键指标用于验证
+        key_metrics = {k: v for k, v in metrics.items()
+                       if k in ('annual_roe', 'annual_gross_margin', 'annual_debt_ratio',
+                                'annual_ocf_to_netprofit', 'quarter_roe', 'quarter_gross_margin',
+                                'quarter_ocf_to_netprofit', 'quarter_debt_ratio')}
+        logger.info(f"[FA-L1] Key metrics: {key_metrics}")
+        return metrics
+    except Exception as e:
+        logger.warning(f"[FA-L1] Failed to extract metrics for {symbol} @ {date_str}: {e}")
+        return {}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -481,8 +596,16 @@ class HybridBacktestEngine:
         set_global_config(self.config)
 
         # ── BacktestConfig（供 ExecutionEngine 使用） ──
+        # 🆕2: 获取真实股票名称用于 ST 检测
+        stock_name = symbol
+        try:
+            from tradingagents.dataflows.akshare_data import get_stock_name
+            stock_name = get_stock_name(symbol)
+        except Exception:
+            pass
         self.bt_config = BacktestConfig(
             symbol=symbol,
+            symbol_stock_name=stock_name,
             start_date=start_date,
             end_date=end_date,
             initial_cash=initial_cash,
@@ -509,11 +632,21 @@ class HybridBacktestEngine:
         self._report_dates: Dict[str, str] = {}  # 预加载的报告日期 {pubDate: statDate}
         self.fa_metrics: Dict[str, Any] = {}
         self.force_decision_next_day: bool = False
+        self._last_fa_report_period: Optional[str] = None  # 上次 L1 分析时的报告期
+        self._last_rule_field_check_idx: int = -1  # 2.2: 上次字段检查的索引（避免每天重复告警）
 
         # ── 记录 ──
         self.l1_analyses_log: List[Dict] = []
         self.daily_states_log: List[Dict] = []
         self.decisions_log: List[Dict] = []
+
+    def _compute_report_period(self, date_str: str) -> Optional[str]:
+        """计算 date_str 对应的最新财务报告期（如 2026Q1）。"""
+        try:
+            from backtest.cache_manager import CacheManager
+            return CacheManager.get_latest_fa_period(date_str)
+        except Exception:
+            return None
 
     def run(self) -> HybridBacktestResult:
         """执行混合回测。"""
@@ -531,6 +664,13 @@ class HybridBacktestEngine:
         # 预加载报告日期（避免每日 baostock 查询超时）
         self._report_dates = self.data_layer.preload_report_dates()
         logger.info(f"  Preloaded {len(self._report_dates)} report dates for {self.symbol}")
+        # D2 v2: 将真实发布日期注入数据过滤层，让 L1 分析用真实 pubDate 过滤财报
+        try:
+            from tradingagents.dataflows.akshare_data import set_report_pub_dates
+            set_report_pub_dates(self.symbol, self._report_dates)
+            logger.info(f"  [D2] Injected {len(self._report_dates)} report pub dates to data layer")
+        except Exception as e:
+            logger.debug(f"[D2] Failed to inject report dates: {e}")
         # 将 date 设为普通列
         df = df_indicators.reset_index()
         df = df.rename(columns={"index": "date"}) if "date" not in df.columns else df
@@ -561,18 +701,20 @@ class HybridBacktestEngine:
 
             close = float(row["close"])
 
-            # ── 季度检测 → L1 完整分析 ──
-            is_q_start, current_period = _is_quarter_start(date_str, self.last_quarter_period)
-            if is_q_start:
+            # ── L1 完整分析：仅在新季报/年报发布时触发 ──
+            is_new_report = self._new_quarterly_report_available(date_str)
+            if is_new_report:
                 logger.info(f"\n{'─'*40}")
-                logger.info(f"[SCHEDULE] Quarter start: {current_period} @ {date_str}")
+                logger.info(f"[SCHEDULE] New report available @ {date_str}")
                 logger.info(f"{'─'*40}")
                 try:
                     result = self.l1_analyzer.run_full_analysis(self.symbol, date_str)
-                    self.last_quarter_period = current_period
+                    # ★ 保存基本面报告文本，供后续 quick 分析复用
+                    self.l1_analyzer._last_fundamentals_report = result.fundamentals_report
 
-                    # 更新基本面指标
+                    # 更新基本面指标 & 记录报告期
                     self.fa_metrics = result.fa_metrics
+                    self._last_fa_report_period = self._compute_report_period(date_str)
 
                     # 构建 WeeklyDecision → 更新 active_decision
                     new_decision = build_weekly_decision_from_rules(
@@ -591,30 +733,45 @@ class HybridBacktestEngine:
                     self.l1_analyses_log.append(result.to_dict())
                     self.decisions_log.append({
                         "date": date_str,
-                        "type": "quarterly_full",
-                        "trigger": f"quarter_start={current_period}",
+                        "type": "full",
+                        "trigger": f"new_report={self._last_report_pub_date}",
                         "signal": result.signal,
                         "rules_count": len(result.trading_rules),
                         "rules": [r.name for r in result.trading_rules],
                     })
-                    logger.info(f"[L1-QUARTERLY] New decision: {result.signal}, "
+                    logger.info(f"[L1-FULL] New decision: {result.signal}, "
                                 f"{len(result.trading_rules)} rules")
                 except Exception as e:
-                    logger.error(f"[L1-QUARTERLY] Failed: {e}")
+                    logger.error(f"[L1-FULL] Failed: {e}")
 
             # ── L1 触发检测（价格变动 / stale / alert） ──
             should_trigger = self._should_trigger_l1(actual_idx, close, date_str)
 
-            if should_trigger and not is_q_start:
+            if should_trigger:
                 # 在 reset 之前捕获触发原因
                 trigger_reason = self._trigger_reason(actual_idx, close)
                 logger.info(f"[SCHEDULE] L1 refresh triggered @ {date_str} (reason={trigger_reason})")
                 try:
                     result = self.l1_analyzer.run_quick_analysis(self.symbol, date_str)
 
+                    # 更新基本面指标（quick 分析也需更新，确保规则引擎拿到最新数据）
+                    self.fa_metrics = result.fa_metrics
+                    self._last_fa_report_period = self._compute_report_period(date_str)
+
+                    # 1-F 修复：构建 WeeklyDecision 时合并季度风控规则
+                    # Quick refresh 可能无风控规则输出 → 保留上轮决策的止损/止盈规则
+                    merged_rules = list(result.trading_rules)
+                    if self.active_decision and self.active_decision.trading_rules:
+                        quick_actions = {r.action for r in merged_rules}
+                        for old_rule in self.active_decision.trading_rules:
+                            if old_rule.action in (RuleAction.STOP_LOSS, RuleAction.TAKE_PROFIT, RuleAction.CIRCUIT_BREAK):
+                                if old_rule.action not in quick_actions:
+                                    merged_rules.append(old_rule)
+                                    logger.debug(f"[1-F] Preserved {old_rule.name} from previous decision")
+                    
                     # 构建 WeeklyDecision
                     new_decision = build_weekly_decision_from_rules(
-                        result.trading_rules,
+                        merged_rules,
                         signal_raw=result.signal,
                         pm_raw_output=result.pm_raw_output,
                         decision_date=date_str,
@@ -654,15 +811,19 @@ class HybridBacktestEngine:
                 daily_state["_vol_ma20"] = round(float(row.get("volume", 0) / (row.get("volume_ma20", 1) or 1)), 2)
                 self.daily_states_log.append(daily_state)
 
-                # 只有 rating_reeval 触发时才强制次日复评
-                # alert_only 仅预警，不触发 L1 重评估
+                # ── rating_reeval 触发检测：只在基本面数据实际变化时才复评 ──
+                # 原则：fa_metrics 按 symbol_reportPeriod 缓存，同报告期内值不变。
+                # 如果规则触发 rating_reeval 但报告期没变（无新季报），跳过复评。
+                # 如果报告期确实变了（新季报发布），允许复评。
                 triggered_rules = daily_state.get("triggered_rules", [])
                 has_reeval = any("rating_reeval" in r for r in triggered_rules)
                 has_alert = any("alert_only" in r or "observation_anchor" in r for r in triggered_rules)
 
                 if has_reeval:
+                    # 1.2 修复：RATING_REEVAL 无条件触发复评（不绑新季报）
+                    # 设计初衷是"市场条件变化→重新评估"，应在下一个交易日跑全量 Agent
                     self.force_decision_next_day = True
-                    logger.info(f"[REVAL] rating_reeval triggered @ {date_str}, forcing re-eval next day")
+                    logger.info(f"[REVAL] rating_reeval @ {date_str}, forcing re-eval next day")
                 elif has_alert:
                     logger.info(f"[ALERT] alert_only triggered @ {date_str} (observation only, no force re-eval)")
             except Exception as e:
@@ -723,17 +884,16 @@ class HybridBacktestEngine:
         )
 
     def _should_trigger_l1(self, idx: int, close: float, date_str: str) -> bool:
-        """判断是否需要触发 L1 分析刷新（价格变动 / stale / 首日 / alert / 新季报）。"""
+        """判断是否需要触发 L1 快速刷新（价格变动 / stale / 首日 / alert）。
+
+        注意：新季报发布现在直接走 full_analysis，不经过此函数。
+        """
         # 首日
         if idx == 0:
             return True
 
         # Alert 触发次日强制
         if self.force_decision_next_day:
-            return True
-
-        # 新季报发布 → 立即重评
-        if self._new_quarterly_report_available(date_str):
             return True
 
         # 价格变动超过阈值
@@ -772,14 +932,11 @@ class HybridBacktestEngine:
         return False
 
     def _trigger_reason(self, idx: int, close: float) -> str:
-        """返回 L1 触发原因。"""
+        """返回 L1 快速刷新触发原因（不包含新季报，新季报直接走 full_analysis）。"""
         if idx == 0:
             return "first_day"
         if self.force_decision_next_day:
             return "alert_triggered"
-        # 新季报优先于价格变动判断
-        if self._last_report_pub_date and idx - self.last_decision_idx < self.stale_days:
-            return f"new_report={self._last_report_pub_date}"
         if self.last_decision_price > 0:
             pc = abs(close - self.last_decision_price) / self.last_decision_price
             if pc >= self.price_change_threshold:
@@ -794,6 +951,23 @@ class HybridBacktestEngine:
         """每日 L2 规则执行 — 通过 ExecutionEngine.execute()。"""
         # 更新 portfolio 日期
         self.portfolio.current_date = date_str
+
+        # 2.2: 检查规则引用的基本面字段是否在 fa_metrics 中存在
+        if (self.active_decision and self.active_decision.trading_rules
+                and self.fa_metrics and self._last_rule_field_check_idx != idx):
+            self._last_rule_field_check_idx = idx
+            fa_keys = set(self.fa_metrics.keys())
+            for rule in self.active_decision.trading_rules:
+                if not rule.condition_str:
+                    continue
+                # 提取条件中引用的字段名
+                refs = set(re.findall(r'\b(annual_\w+|quarter_\w+)\b', rule.condition_str))
+                missing = refs - fa_keys
+                if missing:
+                    logger.warning(
+                        f"[RULE-FIELD] Rule '{rule.name}' references missing FA fields: "
+                        f"{missing}. Rule will never trigger (NaN → False)."
+                    )
 
         # 调用 ExecutionEngine
         daily_state = self.execution_engine.execute(

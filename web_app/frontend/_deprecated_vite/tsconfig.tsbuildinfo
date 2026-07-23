@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/components/chatpanel.tsx","./src/components/datapanels.tsx","./src/components/masterpanel.tsx","./src/components/reportviewer.tsx","./src/components/roundtable.tsx","./src/components/stockinput.tsx","./src/components/theoryeditor.tsx","./src/types/index.ts"],"version":"5.6.3"}

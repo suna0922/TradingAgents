@@ -404,9 +404,13 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
             action_str = rule.action.value
             if rule.action in (RuleAction.SELL_PCT, RuleAction.BUY_ADD) and rule.action_detail:
                 # 从 action_detail 提取比例，如 "降至30%仓位" → 30
+                # 🆕1 修复: 降至/降到/减至 → 100-N（降至30% = 应卖70%）
                 pct_match = re.search(r'(\d+)%', rule.action_detail)
                 if pct_match:
-                    action_str = f"{rule.action.value}({pct_match.group(1)}%)"
+                    raw_pct = int(pct_match.group(1))
+                    if rule.action == RuleAction.SELL_PCT and re.search(r'降至|降到|减至', rule.action_detail):
+                        raw_pct = 100 - raw_pct
+                    action_str = f"{rule.action.value}({raw_pct}%)"
                 elif rule.action == RuleAction.SELL_PCT and ('剩余仓位' in rule.action_detail or '全部' in rule.action_detail or '清仓' in rule.action_detail):
                     # 卖出剩余仓位/全部清仓的语义，应使用 stop_loss
                     action_str = RuleAction.STOP_LOSS.value

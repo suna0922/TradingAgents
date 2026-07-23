@@ -25,6 +25,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_language_instruction,
+    get_master_methodology,
     get_news,
 )
 from tradingagents.dataflows.reddit import fetch_reddit_posts
@@ -47,14 +48,22 @@ def create_sentiment_analyst(llm):
         ticker = state["company_of_interest"]
         end_date = state["trade_date"]
         start_date = _seven_days_back(end_date)
-        instrument_context = build_instrument_context(ticker, stock_name=state.get("stock_name", ""))
+        instrument_context = build_instrument_context(ticker, stock_name=state.get("stock_name", ""), curr_date=state.get("trade_date"))
 
         # Pre-fetch all three sources. Each fetcher degrades gracefully and
         # returns a string (no exceptions surface from here), so the LLM
         # always sees something — either real data or a clear placeholder.
+        # 3-G 修复: A 股跳过 StockTwits/Reddit（仅覆盖英文市场，且不支持历史日期查询）
+        is_ashare = ticker.isdigit() and len(ticker) == 6
         news_block = get_news.func(ticker, start_date, end_date)
-        stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
-        reddit_block = fetch_reddit_posts(ticker)
+        stocktwits_block = (
+            "<A-shares: StockTwits data skipped (English-only platform, no historical API)>"
+            if is_ashare else fetch_stocktwits_messages(ticker, limit=30)
+        )
+        reddit_block = (
+            "<A-shares: Reddit data skipped (English-only platform, no historical API)>"
+            if is_ashare else fetch_reddit_posts(ticker)
+        )
 
         system_message = _build_system_message(
             ticker=ticker,
@@ -64,6 +73,7 @@ def create_sentiment_analyst(llm):
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
         )
+        system_message = system_message + get_master_methodology("sentiment_analyst")
 
         prompt = ChatPromptTemplate.from_messages(
             [

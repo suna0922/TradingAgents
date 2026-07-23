@@ -25,7 +25,7 @@ def create_trader(llm):
     def trader_node(state, name):
         company_name = state["company_of_interest"]
         asset_type = state.get("asset_type", "stock")
-        instrument_context = build_instrument_context(company_name, asset_type, stock_name=state.get("stock_name", ""))
+        instrument_context = build_instrument_context(company_name, asset_type, stock_name=state.get("stock_name", ""), curr_date=state.get("trade_date"))
         investment_plan = state["investment_plan"]
         master_methodology = get_master_methodology("trader")
 

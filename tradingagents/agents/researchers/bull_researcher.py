@@ -21,7 +21,7 @@ def create_bull_researcher(llm):
             else "Asset fundamentals report (may be unavailable for crypto)"
         )
         instrument_context = build_instrument_context(
-            state["company_of_interest"], stock_name=state.get("stock_name", "")
+            state["company_of_interest"], stock_name=state.get("stock_name", ""), curr_date=state.get("trade_date")
         )
         master_methodology = get_master_methodology("bull_researcher")
 

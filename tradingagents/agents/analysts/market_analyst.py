@@ -17,6 +17,7 @@ def create_market_analyst(llm):
         instrument_context = build_instrument_context(
             state["company_of_interest"], asset_type,
             stock_name=state.get("stock_name", ""),
+            curr_date=state.get("trade_date"),
         )
         master_methodology = get_master_methodology("market_analyst")
 

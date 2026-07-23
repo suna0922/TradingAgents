@@ -103,6 +103,47 @@ _METHODLOGY_TEMPLATE = """\n
 === 方法论注入结束 ===\n"""
 
 
+# User-authored custom theory injected into a role's prompt.  Follows the same
+# "角色定义 + {自定义理论}" contract as the master methodology so an agent's
+# prompt body stays identical whether the slot is filled by a preset master or
+# by the user's own investment thesis.
+_CUSTOM_THEORY_TEMPLATE = """\n
+=== 自定义理论注入{who} ===
+
+{text}
+
+=== 自定义理论注入结束 ===\n"""
+
+
+# Nicer Chinese label for the custom-theory header, keyed by role.
+_ROLE_LABEL: dict[str, str] = {
+    "bull_researcher":      "（多头研究员）",
+    "bear_researcher":      "（空头研究员）",
+    "aggressive_debator":   "（激进风控）",
+    "conservative_debator": "（保守风控）",
+    "neutral_debator":      "（中立风控）",
+    "trader":               "（交易员）",
+    "portfolio_manager":    "（投资组合经理）",
+    "research_manager":     "（研究主管）",
+    "fundamentals_analyst": "（基本面分析师）",
+    "market_analyst":       "（技术面分析师）",
+    "news_analyst":         "（新闻分析师）",
+    "sentiment_analyst":    "（情绪面分析师）",
+}
+
+
+def format_custom_theory(role: str, text: str) -> str:
+    """Wrap user-authored theory text into the standard injection block.
+
+    Public so the web layer / callers can preview exactly what will be
+    injected for a given role.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    return _CUSTOM_THEORY_TEMPLATE.format(who=_ROLE_LABEL.get(role, ""), text=text)
+
+
 def _format_methodology(data: dict) -> str:
     """Convert a master YAML dict into a formatted prompt snippet."""
     principles = data.get("core_principles", [])
@@ -133,22 +174,36 @@ def get_master_methodology(
     role: str,
     master_id: Optional[str] = None,
 ) -> str:
-    """Return a formatted methodology prompt snippet for the given role.
+    """Return the theory-injection snippet for the given role.
+
+    Unified "角色定义 + {自定义理论}" resolution — the injected block can come
+    from either a preset master methodology or a user-authored custom theory:
+
+        1. explicit ``master_id`` argument            (highest priority)
+        2. config ``custom_theory_config[role]``      (user's own theory text)
+        3. env override key (TRADINGAGENTS_MASTER_*)  (master_id)
+        4. config ``master_config[role]``             (master_id)
+        5. "" — no injection, original prompt only    (lowest priority)
 
     Args:
         role: Agent role name (e.g. "bull_researcher", "aggressive_debator")
         master_id: Explicit master override. If None, reads from config.
 
     Returns:
-        Formatted methodology string, or "" if no master is configured.
+        Formatted injection string, or "" if nothing is configured.
     """
     if not _MASTER_CACHE:
         _discover_masters()
 
-    # Resolve master_id: explicit override → env override → config → empty
+    # Resolve: explicit override → custom theory → env override → config → empty
     if master_id is None:
         from tradingagents.dataflows.config import get_config
         config = get_config()
+
+        # User-authored custom theory wins over any master selection.
+        custom_text = (config.get("custom_theory_config") or {}).get(role, "")
+        if custom_text and str(custom_text).strip():
+            return format_custom_theory(role, str(custom_text))
 
         # Check top-level env override keys first (TRADINGAGENTS_MASTER_<SHORT>)
         _ENV_KEY_MAP = {
@@ -160,6 +215,10 @@ def get_master_methodology(
             "trader":               "master_trader",
             "portfolio_manager":    "master_pm",
             "research_manager":     "master_rm",
+            "fundamentals_analyst": "master_fundamentals",
+            "market_analyst":       "master_market",
+            "news_analyst":         "master_news",
+            "sentiment_analyst":    "master_sentiment",
         }
         env_key = _ENV_KEY_MAP.get(role)
         if env_key and config.get(env_key):

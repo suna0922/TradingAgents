@@ -40,6 +40,59 @@ _RATING_TO_DIRECTION = {
     "Sell": TradeDirection.SELL,
 }
 
+# 2-J: 中文操作符 → Python 操作符归一化映射
+_CHINESE_OP_MAP = {
+    "跌破": "<",
+    "低于": "<",
+    "跌破于": "<",
+    "跌穿": "<",
+    "小于": "<",
+    "少于": "<",
+    "不到": "<",
+    "不足": "<",
+    "突破": ">",
+    "高于": ">",
+    "超过": ">",
+    "大于": ">",
+    "超过于": ">",
+    "多于": ">",
+    "升破": ">",
+    "高过": ">",
+    "等于": "==",
+    "达到": ">=",
+    "达到或超过": ">=",
+    "不低于": ">=",
+    "不高于": "<=",
+    "不超过": "<=",
+    "且": "and",
+    "并且": "and",
+    "同时": "and",
+    "与": "and",
+    "或": "or",
+    "或者": "or",
+}
+
+
+def _normalize_chinese_condition(condition: str) -> str:
+    """2-J 修复：将中文条件字符串归一化为 Python 可 eval 的表达式。
+    
+    示例:
+        "跌破200日均线且缩量" → "close < MA(close,200) and volume < MA(volume,5)"
+        "价格高于50且成交量突破1000万" → "close > 50 and volume > 10000000"
+    
+    注意：只做操作符替换，不处理字段名映射（字段名映射在 eval_condition 中处理）。
+    """
+    if not condition:
+        return condition
+    result = condition
+    # 按长度降序替换（长模式先匹配，避免部分匹配）
+    for cn_op in sorted(_CHINESE_OP_MAP, key=len, reverse=True):
+        result = result.replace(cn_op, f" {_CHINESE_OP_MAP[cn_op]} ")
+    # 归一化多余空格
+    result = " ".join(result.split())
+    return result
+
+
 _RATING_TO_POSITION = {
     "Buy": 0.80,          # 重仓买入
     "Overweight": 0.60,   # 超配
@@ -74,7 +127,7 @@ class DecisionEngine:
         self._decision_graph = None
 
         # LLM client 注入标志
-        _llm_injected = False
+        self._llm_injected = False
 
         # ── FA 指标缓存 ──
         # key = f"{symbol}_{report_period}"（如 "000423_2026Q1"）
@@ -142,8 +195,8 @@ class DecisionEngine:
         """
         report_period = self.cache.get_latest_fa_period(date_str)
 
-        # 检查缓存
-        cached = self.cache.get_fa_report(symbol, report_period)
+        # 检查缓存（带分析日期防止跨运行前视）
+        cached = self.cache.get_fa_report(symbol, report_period, analysis_date=date_str)
         if cached is not None:
             logger.info(f"[L0-FA] Cache HIT {symbol} {report_period}")
             return cached
@@ -163,7 +216,7 @@ class DecisionEngine:
                 "fundamentals_report": state_dict.get("fundamentals_report", ""),
                 "final_trade_decision": state_dict.get("final_trade_decision", ""),
             }
-            self.cache.save_fa_report(symbol, report_period, result)
+            self.cache.save_fa_report(symbol, report_period, result, analysis_date=date_str)
 
             # ★ 并行提取结构化 L1 指标（用于 L2 执行引擎注入）
             self._extract_and_cache_fa_metrics(symbol, report_period, date_str=date_str)
@@ -497,6 +550,9 @@ class DecisionEngine:
             try:
                 # 优先使用 trigger_sql（SQL 形式），fallback 到 trigger_condition
                 condition = r_data.get("trigger_sql", "") or r_data.get("trigger_condition", "")
+                # 2-J 修复：fallback 中文条件归一化（跌破→<, 超过→>，等）
+                if condition and not r_data.get("trigger_sql", ""):
+                    condition = _normalize_chinese_condition(condition)
 
                 # 解析 action
                 action_str = r_data.get("action", "hold")
@@ -535,13 +591,8 @@ class DecisionEngine:
                 if priority == 50 and rule_type in priority_map:
                     priority = priority_map[rule_type]
 
-                # 解析 pct（从 action_detail 或 source_sentence 中提取）
+                # 解析 pct（直接取结构化字段，无正则兜底）
                 pct = r_data.get("pct", 0.0)
-                if pct == 0.0:
-                    # 尝试从 action_detail 中提取百分比
-                    action_detail = r_data.get("action_detail", "")
-                    if action_detail:
-                        pct = self._extract_pct_from_text(action_detail) or 0.0
 
                 rule = TradingRule(
                     name=f"[{rule_type}] {condition[:40]}",
@@ -565,7 +616,7 @@ class DecisionEngine:
 
         匹配模式：
         - "减仓30%" → 0.30
-        - "降至30%仓位" → 0.30
+        - "降至30%仓位" → 0.70（1-B修复：降至 = 卖 1-N）
         - "加仓20%" → 0.20
         - "建立40%底仓" → 0.40
         - "卖出50%" → 0.50
@@ -577,13 +628,17 @@ class DecisionEngine:
             return None
         # 匹配中文描述中的百分比
         patterns = [
-            r'(?:减仓|减持|卖出|降至|建立|加仓|买入|增至)[\D]*(\d+)%',
+            r'(?:减仓|减持|卖出|降至|降到|减至|建立|加仓|买入|增至)[\D]*(\d+)%',
             r'(\d+)%[\D]*(?:仓位|底仓|持仓|比例)',
         ]
         for pat in patterns:
             match = re.search(pat, text)
             if match:
-                return float(match.group(1)) / 100.0
+                raw_pct = float(match.group(1)) / 100.0
+                # 1-B 修复：降至/降到/减至 → 需要卖 (1-N)，而非 N
+                if re.search(r'降至|降到|减至', text):
+                    return 1.0 - raw_pct
+                return raw_pct
         return None
 
     # ── 正则提取辅助方法 ──────────────────────────────────────────
@@ -774,7 +829,8 @@ class DecisionEngine:
 
             # 展平
             metrics = flatten_dual_period(dual_result)
-            cache_key = f"{symbol}_{report_period}"
+            # 2-F 修复：缓存键加入 analysis_date，防止跨日期/跨运行前视复用
+            cache_key = f"{symbol}_{report_period}_{date_str}"
             self._fa_metrics_cache[cache_key] = metrics
             self._current_fa_quarter_key = cache_key
 
@@ -801,8 +857,19 @@ class DecisionEngine:
             展平后的 FA 指标字典，如 {"annual_roe": 22.5, "quarter_ocf_to_netprofit": 0.95}
         """
         report_period = self.cache.get_latest_fa_period(date_str)
-        cache_key = f"{symbol}_{report_period}"
-        metrics = self._fa_metrics_cache.get(cache_key, {})
+        # 2-F 修复：按日期感知的键查找，回退到向后兼容的无日期键
+        prefix = f"{symbol}_{report_period}"
+        dated_key = f"{prefix}_{date_str}"
+        metrics = self._fa_metrics_cache.get(dated_key, {})
         if not metrics:
-            logger.debug(f"[FA-Cache] Miss for {cache_key}")
+            # 回退：无日期键（向后兼容旧缓存）
+            metrics = self._fa_metrics_cache.get(prefix, {})
+        if not metrics:
+            # 最后尝试：查找该 report_period 的最近日期匹配
+            for k in sorted(self._fa_metrics_cache.keys(), reverse=True):
+                if k.startswith(prefix):
+                    metrics = self._fa_metrics_cache[k]
+                    break
+        if not metrics:
+            logger.debug(f"[FA-Cache] Miss for {prefix} @ {date_str}")
         return metrics

@@ -59,35 +59,57 @@ class CacheManager:
 
     # ── FA 报告缓存 ─────────────────────────────────────────────
 
-    def get_fa_report(self, symbol: str, report_period: str) -> Optional[Dict]:
+    def get_fa_report(self, symbol: str, report_period: str,
+                      analysis_date: str = "") -> Optional[Dict]:
         """获取缓存的 FA 报告。
+        
+        2-F 修复：支持 analysis_date 以防止跨日期/跨运行前视复用。
 
         Args:
             symbol: 股票代码，如 "000960"
             report_period: 报告期，如 "2024Q1", "2024Q2"
+            analysis_date: 分析日期 YYYY-MM-DD（可选，用于区分不同日期的缓存）
 
         Returns:
             缓存的 dict 或 None（未命中）
         """
+        # 2-F 修复：缓存文件名含 analysis_date（提供则精确匹配，否则回退兼容）
+        if analysis_date:
+            cache_file = self.fa_dir / f"{symbol}_{report_period}_{analysis_date}.json"
+            if cache_file.exists():
+                try:
+                    with open(cache_file, encoding="utf-8") as f:
+                        data = json.load(f)
+                        logger.debug(f"[Cache] FA HIT {symbol} {report_period} @ {analysis_date}")
+                        return data
+                except (json.JSONDecodeError, IOError) as e:
+                    logger.warning(f"[Cache] FA cache corrupt: {cache_file}, {e}")
+            return None
+        # 回退：旧版无日期键
         cache_file = self.fa_dir / f"{symbol}_{report_period}.json"
         if cache_file.exists():
             try:
                 with open(cache_file, encoding="utf-8") as f:
                     data = json.load(f)
-                    logger.debug(f"[Cache] FA HIT {symbol} {report_period}")
+                    logger.debug(f"[Cache] FA HIT {symbol} {report_period} (undated)")
                     return data
             except (json.JSONDecodeError, IOError) as e:
                 logger.warning(f"[Cache] FA cache corrupt: {cache_file}, {e}")
         return None
 
     def save_fa_report(self, symbol: str, report_period: str,
-                       fa_result: Dict) -> None:
-        """保存 FA 报告到缓存。"""
-        cache_file = self.fa_dir / f"{symbol}_{report_period}.json"
+                       fa_result: Dict, analysis_date: str = "") -> None:
+        """保存 FA 报告到缓存。
+        
+        2-F 修复：提供 analysis_date 时文件名含日期以防止跨运行复用。
+        """
+        # 2-F 修复：文件名含 analysis_date
+        date_suffix = f"_{analysis_date}" if analysis_date else ""
+        cache_file = self.fa_dir / f"{symbol}_{report_period}{date_suffix}.json"
         try:
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(fa_result, f, ensure_ascii=False, indent=2)
-            logger.info(f"[Cache] FA SAVED {symbol} {report_period}")
+            logger.info(f"[Cache] FA SAVED {symbol} {report_period}{date_suffix}")
         except IOError as e:
             logger.error(f"[Cache] Failed to save FA: {e}")
 

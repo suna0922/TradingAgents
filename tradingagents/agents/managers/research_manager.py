@@ -6,6 +6,7 @@ from tradingagents.agents.schemas import ResearchPlan, render_research_plan
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_language_instruction,
+    get_master_methodology,
 )
 from tradingagents.agents.utils.numeric_guard import get_numeric_integrity_prompt
 from tradingagents.agents.utils.structured import (
@@ -18,7 +19,8 @@ def create_research_manager(llm):
     structured_llm = bind_structured(llm, ResearchPlan, "Research Manager")
 
     def research_manager_node(state) -> dict:
-        instrument_context = build_instrument_context(state["company_of_interest"], stock_name=state.get("stock_name", ""))
+        instrument_context = build_instrument_context(state["company_of_interest"], stock_name=state.get("stock_name", ""), curr_date=state.get("trade_date"))
+        master_methodology = get_master_methodology("research_manager")
         history = state["investment_debate_state"].get("history", "")
 
         investment_debate_state = state["investment_debate_state"]
@@ -26,6 +28,7 @@ def create_research_manager(llm):
         prompt = f"""As the Research Manager and debate facilitator, your role is to critically evaluate this round of debate and deliver a clear, actionable investment plan for the trader.
 
 {instrument_context}
+{master_methodology}
 
 ---
 

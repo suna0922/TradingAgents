@@ -8,6 +8,7 @@
 - 返回 DataFrame（非 CSV 字符串），供 L2 执行层 pandas 规则计算使用
 """
 
+import atexit
 import threading
 import logging
 from typing import Optional, Dict
@@ -20,12 +21,27 @@ logger = logging.getLogger(__name__)
 # ── baostock 全局锁（与上游 akshare_data.py 共用同一策略）─────────
 _BS_LOCK = threading.Lock()
 
-# baostock 登录状态（避免重复 login）
+# baostock 登录状态（避免重复 login，持久化连接直到显式清理）
 _bs_logged_in = False
+
+# ── 需要强制重连的异常模式 ──
+_BS_FORCE_RELOGIN_ERRORS = (
+    "Bad file descriptor",
+    "Remote end closed connection",
+    "Connection aborted",
+    "Connection reset",
+    "Broken pipe",
+    "recv data error",
+    "接收数据异常",
+)
 
 
 def _ensure_login():
-    """确保 baostock 已登录。"""
+    """确保 baostock 已登录。
+
+    持久化连接模式：login 一次后保持连接，不每次 logout。
+    仅在检测到连接断开时自动重连。
+    """
     global _bs_logged_in
     if not _bs_logged_in:
         import baostock as bs
@@ -34,6 +50,42 @@ def _ensure_login():
         if not _bs_logged_in:
             logger.warning(f"baostock login failed: {lg.error_msg}")
     return _bs_logged_in
+
+
+def _force_relogin():
+    """强制重连：登出并重置状态。用于检测到连接断开后自动恢复。"""
+    global _bs_logged_in
+    _bs_logged_in = False
+    try:
+        import baostock as bs
+        bs.logout()
+    except Exception:
+        pass
+
+
+def _should_relogin(error: Exception) -> bool:
+    """判断错误是否需要强制重连。"""
+    msg = str(error)
+    for pattern in _BS_FORCE_RELOGIN_ERRORS:
+        if pattern in msg:
+            return True
+    return False
+
+
+def cleanup_baostock():
+    """在回测全部结束后调用，安全登出 baostock。"""
+    global _bs_logged_in
+    try:
+        import baostock as bs
+        bs.logout()
+    except Exception:
+        pass
+    finally:
+        _bs_logged_in = False
+
+
+# 进程退出时自动清理 baostock 连接
+atexit.register(cleanup_baostock)
 
 
 class DataLayer:
@@ -94,17 +146,11 @@ class DataLayer:
 
             except Exception as e:
                 logger.error(f"baostock query error for {code}: {e}")
-                # 尝试 fallback
-                try:
-                    bs.logout()
-                except Exception:
-                    pass
+                # 检测连接断开，强制重连（下次调用自动恢复）
+                if _should_relogin(e):
+                    logger.info("baostock connection broken, forcing re-login")
+                    _force_relogin()
                 return self._fallback_fetch()
-            finally:
-                try:
-                    bs.logout()
-                except Exception:
-                    pass
 
         if not rows:
             logger.warning(f"No data returned for {code} [{bs_start} ~ {bs_end}]")
@@ -171,10 +217,11 @@ class DataLayer:
         except Exception as e:
             logger.error(f"akshare fallback also failed: {e}")
 
-        # 返回空 DataFrame 而非崩溃
-        return pd.DataFrame(
-            columns=["open", "high", "low", "close", "volume",
-                      "amount", "pct_chg", "turn"]
+        # 两个数据源都失败 → 报错退出，不静默返回空数据
+        raise RuntimeError(
+            f"DataLayer: ALL data sources failed for {self.symbol} "
+            f"[{self.start_date} ~ {self.end_date}]. "
+            f"baostock exhausted, akshare fallback also failed."
         )
 
     # ── 技术指标计算 ────────────────────────────────────────────
@@ -214,7 +261,11 @@ class DataLayer:
             "boll", "boll_ub", "boll_lb",
             "kdjk", "kdjd", "kdjj",
             "atr",
-            "close_5_sma", "close_20_sma", "close_50_sma",
+            # 收盘价 SMA（短中长期全覆盖）
+            "close_5_sma", "close_10_sma", "close_20_sma", "close_50_sma",
+            "close_60_sma", "close_120_sma", "close_200_sma", "close_250_sma",
+            # 成交量 SMA（用于量能确认规则）
+            "volume_5_sma", "volume_10_sma", "volume_20_sma",
         ]
 
         for col in indicator_cols:

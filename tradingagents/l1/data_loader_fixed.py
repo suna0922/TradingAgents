@@ -153,11 +153,27 @@ except ImportError:
     from l1_config import DataConfig
 
 
+def _est_pub_date(period_ts: pd.Timestamp) -> pd.Timestamp:
+    """D2 修复：用保守估计的发布日代替会计期截止日。
+    
+    - 年报 (12-31): 次年 4/30  - Q1 (03-31): 当年 4/30
+    - 中报 (06-30): 当年 8/31  - Q3 (09-30): 当年 10/31
+    """
+    m = period_ts.month
+    y = period_ts.year
+    if m == 12:    return pd.Timestamp(year=y + 1, month=4, day=30)
+    elif m == 3:   return pd.Timestamp(year=y, month=4, day=30)
+    elif m == 6:   return pd.Timestamp(year=y, month=8, day=31)
+    elif m == 9:   return pd.Timestamp(year=y, month=10, day=31)
+    else:          return period_ts + pd.DateOffset(months=2)
+
+
 def _filter_abstract_periods(
     df: pd.DataFrame,
     max_annual: int = None,
     max_quarter: int = None,
     cutoff_date: str = None,
+    symbol: str = "",
 ) -> pd.DataFrame:
     """
     裁剪stock_financial_abstract数据，只保留最近N年年报和M个季度报。
@@ -165,6 +181,7 @@ def _filter_abstract_periods(
     默认值从 DataConfig 读取（ANNUAL_YEARS=5, QUARTER_COUNT=4）。
 
     当 cutoff_date 提供时，额外排除该日期之后的报告期列（防止 look-ahead bias）。
+    D2 v2: 支持 symbol 参数以使用 baostock 真实 pubDate。
     """
     if df is None or df.empty:
         return df
@@ -181,15 +198,41 @@ def _filter_abstract_periods(
     period_cols_sorted = sorted(period_cols, key=lambda x: str(x), reverse=True)
 
     # ---- 按 cutoff_date 排除未来报告期（look-ahead bias 防护）----
+    # D2 v2: 真实 pubDate 优先 → 保守估计回退
     if cutoff_date:
         try:
+            # 尝试导入真实 pubDate 查询
+            try:
+                from tradingagents.dataflows.akshare_data import _lookup_pub_date
+            except ImportError:
+                _lookup_pub_date = None
             cutoff = pd.Timestamp(cutoff_date)
-            # 报告期列名格式如 "20251231"，转为 Timestamp 比较
             valid_cols = []
             for c in period_cols_sorted:
                 try:
                     ts = pd.Timestamp(str(c))
-                    if ts <= cutoff:
+                    # D2 v2: 真实 pubDate 优先
+                    if symbol and _lookup_pub_date:
+                        pub = _lookup_pub_date(ts, symbol)
+                        if pub is not None:
+                            if pub <= cutoff:
+                                valid_cols.append(c)
+                            continue
+                    # 回退：保守估计
+                    if _est_pub_date(ts) <= cutoff:
+                        valid_cols.append(c)
+                except Exception:
+                    valid_cols.append(c)  # 无法解析的列保留
+            period_cols_sorted = valid_cols
+        except Exception:
+            pass  # 解析失败时不裁剪
+            cutoff = pd.Timestamp(cutoff_date)
+            valid_cols = []
+            for c in period_cols_sorted:
+                try:
+                    ts = pd.Timestamp(str(c))
+                    # 比较估计发布日而非报告期
+                    if _est_pub_date(ts) <= cutoff:
                         valid_cols.append(c)
                 except Exception:
                     valid_cols.append(c)  # 无法解析的列保留
@@ -228,7 +271,7 @@ def get_financial_indicator_safe(code: str, years: int = 3, analysis_date: str =
     try:
         df = ak.stock_financial_abstract(symbol=code)
         if df is not None and len(df) > 0:
-            df = _filter_abstract_periods(df, cutoff_date=analysis_date)  # 使用 DataConfig 默认值 + cutoff 过滤
+            df = _filter_abstract_periods(df, cutoff_date=analysis_date, symbol=code)
             print(f"    ✅ stock_financial_abstract成功: {df.shape[0]}行×{df.shape[1]}列")
             return df
     except Exception as e:

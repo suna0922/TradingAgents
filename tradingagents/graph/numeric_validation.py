@@ -33,7 +33,9 @@ def inject_fundamentals_structured(state: AgentState) -> dict:
     """
     try:
         from tradingagents.dataflows.akshare_data import get_fundamentals_structured
-        structured = get_fundamentals_structured()
+        # 按 ticker 键控读取，避免并发会话下拿到其他标的的数据
+        ticker = state.get("company_of_interest", "")
+        structured = get_fundamentals_structured(ticker or None)
     except Exception as e:
         logger.warning("Could not load fundamentals structured data: %s", e)
         structured = {}

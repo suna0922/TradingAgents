@@ -3,6 +3,7 @@ from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_global_news,
     get_language_instruction,
+    get_master_methodology,
     get_news,
 )
 from tradingagents.dataflows.config import get_config
@@ -16,7 +17,9 @@ def create_news_analyst(llm):
         instrument_context = build_instrument_context(
             state["company_of_interest"], asset_type,
             stock_name=state.get("stock_name", ""),
+            curr_date=state.get("trade_date"),
         )
+        master_methodology = get_master_methodology("news_analyst")
 
         tools = [
             get_news,
@@ -26,6 +29,7 @@ def create_news_analyst(llm):
         system_message = (
             f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics. Use the available tools: get_news(query, start_date, end_date) for {asset_label}-specific or targeted news searches, and get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
+            + master_methodology
             + get_language_instruction()
         )
 

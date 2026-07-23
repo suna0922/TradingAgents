@@ -149,10 +149,11 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
         # code (stockstats, indicators) degrades gracefully.
         return pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close", "Volume"])
 
-    data = _clean_dataframe(data)
-
-    # Filter to curr_date to prevent look-ahead bias in backtesting
+    # ★ D1 修复：日期过滤在 _clean_dataframe 之前执行，防止 bfill 用未来价格回填
+    # Filter to curr_date BEFORE cleaning so bfill only uses data up to curr_date
     data = data[data["Date"] <= curr_date_dt]
+
+    data = _clean_dataframe(data)
 
     return data
 

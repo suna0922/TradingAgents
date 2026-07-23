@@ -16,7 +16,7 @@ from tradingagents.dataflows.config import get_config
 def create_fundamentals_analyst(llm):
     def fundamentals_analyst_node(state):
         current_date = state["trade_date"]
-        instrument_context = build_instrument_context(state["company_of_interest"], stock_name=state.get("stock_name", ""))
+        instrument_context = build_instrument_context(state["company_of_interest"], stock_name=state.get("stock_name", ""), curr_date=state.get("trade_date"))
         master_methodology = get_master_methodology("fundamentals_analyst")
 
         tools = [

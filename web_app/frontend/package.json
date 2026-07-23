@@ -1,0 +1,24 @@
+{
+  "name": "stock-roundtable",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src-vanilla/app.jsx --bundle --minify --charset=utf8 --jsx=transform --jsx-factory=React.createElement --jsx-fragment=React.Fragment --outfile=vendor/app.js --loader:.jsx=jsx",
+    "watch": "esbuild src-vanilla/app.jsx --bundle --charset=utf8 --jsx=transform --jsx-factory=React.createElement --jsx-fragment=React.Fragment --outfile=vendor/app.js --loader:.jsx=jsx --watch"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.16",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3"
+  }
+}

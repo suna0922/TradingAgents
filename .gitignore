@@ -251,3 +251,15 @@ batch_results/
 *tmp*
 *~*
 *.bak
+
+# CodeBuddy IDE 本地配置
+.codebuddy/
+
+# Node.js 依赖
+node_modules/
+
+# 部署构建产物
+deploy/*.tar.gz
+
+# 备份文件 - 覆盖 trading_memory.md.bak_* 等带时间戳的备份
+*.bak_*

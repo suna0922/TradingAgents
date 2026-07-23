@@ -12,7 +12,7 @@ import threading
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Annotated, Optional
+from typing import Annotated, Optional, Dict
 
 import pandas as pd
 import numpy as np
@@ -37,7 +37,9 @@ _bs_lock = threading.Lock()
 # same symbol — only one actual request to 东方财富, second returns cache.
 _ak_cache: dict = {}          # {cache_key: (result, timestamp)}
 _ak_cache_lock = threading.Lock()
-_AK_CACHE_TTL: float = 120.0  # seconds — longer than any single analysis run
+# 15 min — 必须长于一次完整 LLM 分析（数分钟），否则分析中期缓存过期
+# 会导致 agent 工具重新取数并吃 3s 节流。财报/日K 数据 15 分钟内不会变化。
+_AK_CACHE_TTL: float = 900.0
 
 
 def _make_cache_key(func_name: str, *args, **kwargs) -> str:
@@ -259,6 +261,7 @@ def _fetch_via_baostock(symbol: str, start_str: str, end_str: str) -> pd.DataFra
         return pd.DataFrame()
 
     try:
+        # ── 持久化连接：login 一次，不每次 logout ──
         lg = bs.login()
         if lg.error_code != '0':
             logger.error("baostock login failed: %s", lg.error_msg)
@@ -283,10 +286,8 @@ def _fetch_via_baostock(symbol: str, start_str: str, end_str: str) -> pd.DataFra
                 logger.debug("Unexpected error reading baostock row: %s", e2)
                 break
 
-        try:
-            bs.logout()
-        except Exception:
-            pass  # connection may already be torn down after encoding errors
+        # ⚠️ 不再 logout — 保持连接存活供后续查询复用
+        # 仅在连接断开等异常时清理
 
         if not rows:
             logger.warning("baostock returned 0 rows for %s (%s ~ %s)", symbol, bs_start, bs_end)
@@ -308,10 +309,17 @@ def _fetch_via_baostock(symbol: str, start_str: str, end_str: str) -> pd.DataFra
 
     except Exception as e:
         logger.error("baostock fetch error for %s: %s", symbol, e)
-        try:
-            bs.logout()
-        except Exception:
-            pass
+        # 连接异常时登出，下次调用自动重登
+        err_msg = str(e)
+        if any(p in err_msg for p in ("Bad file descriptor", "Remote end closed",
+                                       "Connection aborted", "Connection reset",
+                                       "Broken pipe", "recv data error",
+                                       "接收数据异常")):
+            logger.info("baostock connection broken, will re-login on next call")
+            try:
+                bs.logout()
+            except Exception:
+                pass
         return pd.DataFrame()
 
     finally:
@@ -549,22 +557,90 @@ def get_indicators(
 # ══════════════════════════════════════════════════════════════════
 
 # Module-level cache for structured fundamentals data (consumed by numeric_guard)
-_last_fundamentals_structured: dict = {}
+# ── 并发安全：按 ticker 键控存储，避免多会话竞态拿错标的数据 ──
+_last_fundamentals_structured: dict = {}                  # legacy: 最近一次（单会话兼容）
+_fundamentals_structured_by_ticker: dict = {}             # {ticker: structured_dict}
+_fundamentals_structured_lock = threading.Lock()
+
+# D2 v2: 报告真实发布日缓存 {symbol: {statDate(str): pubDate(str)}}
+# 由回测引擎启动时预加载，数据层过滤时优先用真实发布日，回退到保守估计
+_report_pub_dates_cache: Dict[str, Dict[str, str]] = {}
+_report_pub_dates_lock = threading.Lock()
 
 
-def _filter_by_report_date(df: "pd.DataFrame", curr_date: str) -> "pd.DataFrame":
-    """Filter DataFrame rows whose report-period (first column) is <= curr_date.
+def set_report_pub_dates(symbol: str, pub_to_stat: Dict[str, str]) -> None:
+    """D2 v2: 注册某只股票的真实报告发布日期映射。
+    
+    Args:
+        symbol: 股票代码
+        pub_to_stat: {pubDate(YYYY-MM-DD): statDate(YYYY-MM-DD)} 映射
+    """
+    with _report_pub_dates_lock:
+        # 构建反向索引：statDate → pubDate
+        rev: Dict[str, str] = {}
+        for pub, stat in pub_to_stat.items():
+            if stat and pub:
+                rev[stat] = pub
+        _report_pub_dates_cache[symbol.upper()] = rev
 
-    Tries the first column as the date column; falls back to any column whose
-    name contains "期" or "date" (case-insensitive).  Returns a **copy** so
-    callers can safely mutate the result.
 
-    When ``curr_date`` is None/empty, returns ``df.copy()`` unchanged.
+def _lookup_pub_date(stat_date: "pd.Timestamp", symbol: str = "") -> "pd.Timestamp | None":
+    """D2 v2: 查找报告的真实发布日。
+    
+    优先查询预加载的 baostock pubDate 缓存；未命中返回 None。
+    调用方应在 None 时回退到 _estimate_publish_date。
+    """
+    if not symbol:
+        return None
+    import pandas as pd
+    with _report_pub_dates_lock:
+        rev = _report_pub_dates_cache.get(symbol.upper(), {})
+    for fmt in (stat_date.strftime("%Y-%m-%d"), stat_date.strftime("%Y%m%d"),
+                stat_date.strftime("%Y-%m-%d 00:00:00")):
+        if fmt in rev:
+            try:
+                return pd.Timestamp(rev[fmt])
+            except Exception:
+                pass
+    return None
+
+
+def _estimate_publish_date(period_date: "pd.Timestamp") -> "pd.Timestamp":
+    """估算财报实际发布日期（保守估计，基于监管截止日）。
+    
+    仅在没有 baostock 真实 pubDate 时作为回退方案使用。
+    真实发布日通常早于这些截止日（如年报很多在 3 月就发布了）。
+    
+    - 年报 (12-31): 次年 4 月 30 日
+    - Q1 (03-31):    当年 4 月 30 日
+    - 中报 (06-30):  当年 8 月 31 日
+    - Q3 (09-30):    当年 10 月 31 日
+    """
+    m = period_date.month
+    y = period_date.year
+    if m == 12:
+        return pd.Timestamp(year=y + 1, month=4, day=30)
+    elif m == 3:
+        return pd.Timestamp(year=y, month=4, day=30)
+    elif m == 6:
+        return pd.Timestamp(year=y, month=8, day=31)
+    elif m == 9:
+        return pd.Timestamp(year=y, month=10, day=31)
+    else:
+        return period_date + pd.DateOffset(months=2)
+
+
+def _filter_by_report_date(df: "pd.DataFrame", curr_date: str,
+                           symbol: str = "") -> "pd.DataFrame":
+    """Filter DataFrame rows whose publish date is <= curr_date.
+    
+    D2 v2 修复：优先用 baostock 真实 pubDate 过滤（由 set_report_pub_dates 预加载），
+    未命中时回退到 _estimate_publish_date 保守估计。
+    消除"年报 1 月即可用"的前视偏差。
     """
     if not curr_date:
         return df.copy()
 
-    # 尝试常见的报告期列名
     date_col_candidates = (
         [df.columns[0]]
         + [c for c in df.columns[1:] if "期" in c or "date" in c.lower()]
@@ -573,23 +649,164 @@ def _filter_by_report_date(df: "pd.DataFrame", curr_date: str) -> "pd.DataFrame"
     for col in date_col_candidates:
         try:
             dates = pd.to_datetime(df[col], errors="coerce")
-            if dates.notna().sum() < 3:  # 太少，跳过
+            if dates.notna().sum() < 3:
                 continue
-            return df[dates <= cutoff].copy()
+            # D2 v2: 真实 pubDate 优先 → 保守估计回退
+            if symbol:
+                pub_dates = dates.apply(
+                    lambda d: _lookup_pub_date(d, symbol) or _estimate_publish_date(d)
+                )
+            else:
+                pub_dates = dates.apply(_estimate_publish_date)
+            return df[pub_dates <= cutoff].copy()
         except Exception:
             continue
-    # 如果所有尝试都失败，返回原 df（不过滤）
     return df.copy()
 
 
-def get_fundamentals_structured() -> dict:
-    """Return the most recent fundamentals data as a structured dict.
+def _safe_float(val):
+    """Convert val to float, returning None on failure."""
+    if val is None or str(val) in ("", "nan", "None"):
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
 
-    This is populated as a side effect of get_fundamentals() and
-    consumed by downstream agents for programmatic numeric cross-checks.
-    Returns empty dict if get_fundamentals() has not been called yet.
+
+def _append_valuation_metrics(
+    ticker: str, curr_date: str | None, structured: dict, lines: list
+) -> None:
+    """Append PE / PB / PEG / MarketCap / PS / Dividend / Beta to fundamentals output."""
+    try:
+        from datetime import date as _date_obj
+        cdate = curr_date or _date_obj.today().strftime("%Y-%m-%d")
+        raw_df = _load_ohlcv_akshare(ticker, cdate)
+        if raw_df is None or raw_df.empty:
+            return
+        price = float(raw_df["Close"].iloc[-1])
+        if price <= 0:
+            return
+
+        # ── 财务分析指标（新浪，最慢接口）：只调一次，走 _safe_call
+        #    （缓存 + 节流 + 重试），PE 和 总资产 复用同一份结果 ──
+        fa_df = None
+        try:
+            _ak_mod = _get_ak()
+            fa_df = _safe_call(
+                _ak_mod.stock_financial_analysis_indicator,
+                symbol=ticker,
+                start_year=str(_date_obj.today().year - 2),
+            )
+        except Exception:
+            fa_df = None
+
+        # ── PE (静态) ──
+        # D2 v2 修复: 优先用真实 pubDate，回退到保守估计
+        try:
+            if fa_df is not None and not fa_df.empty and "摊薄每股收益(元)" in fa_df.columns \
+               and "日期" in fa_df.columns:
+                eps_annual = None
+                cutoff = pd.Timestamp(curr_date) if curr_date else pd.Timestamp.now()
+                for _, row in fa_df[::-1].iterrows():
+                    row_date = str(row["日期"])
+                    if row_date.endswith("12-31"):
+                        period_date = pd.Timestamp(row_date)
+                        # D2 v2: 真实 pubDate 优先 → 保守估计回退
+                        pub_date = (_lookup_pub_date(period_date, ticker)
+                                    or _estimate_publish_date(period_date))
+                        if pub_date > cutoff:
+                            continue
+                        eps_annual = float(row["摊薄每股收益(元)"])
+                        break
+                if eps_annual and eps_annual > 0:
+                    pe = round(price / eps_annual, 2)
+                    lines.append(f"PE (Static): {pe}")
+                    structured["pe_static"] = pe
+        except Exception:
+            pass
+        
+        # ── PB ──
+        bvps = structured.get("book_value_per_share")
+        if bvps and bvps > 0:
+            pb = round(price / bvps, 2)
+            lines.append(f"PB: {pb}")
+            structured["pb"] = pb
+        
+        # ── PEG ──
+        pe_val = structured.get("pe_static")
+        growth = structured.get("net_income_growth_yoy")
+        if pe_val and growth and growth != 0:
+            peg = round(pe_val / abs(growth), 2)
+            lines.append(f"PEG: {peg}")
+            structured["peg"] = peg
+        
+        # ── 总市值 / PS / 股息率 ──
+        try:
+            # 总市值: price × total_shares / 1e8（复用上面同一份 fa_df，不再重复请求）
+            total_assets = None
+            debt_ratio = None
+            try:
+                if fa_df is not None and not fa_df.empty:
+                    latest = fa_df.iloc[-1]
+                    total_assets = _safe_float(latest.get("总资产(元)"))
+                    debt_ratio = _safe_float(latest.get("资产负债率(%)"))
+            except Exception:
+                pass
+            if total_assets and debt_ratio is not None and bvps and bvps > 0:
+                net_assets = total_assets * (1 - debt_ratio / 100)
+                total_shares = net_assets / bvps
+                market_cap = round(price * total_shares / 1e8, 2)
+                lines.append(f"Market Cap (亿): {market_cap}")
+                structured["market_cap_亿"] = market_cap
+                # PS = 总市值 / 营收
+                revenue = structured.get("total_revenue")
+                if revenue and revenue > 0:
+                    ps = round(market_cap / revenue, 2)
+                    lines.append(f"PS: {ps}")
+                    structured["ps"] = ps
+            # 股息率（走 _safe_call：缓存 + 节流 + 重试）
+            try:
+                fhps_df = _safe_call(_get_ak().stock_fhps_detail_ths, symbol=ticker)
+                if fhps_df is not None and not fhps_df.empty and "税前分红率" in fhps_df.columns:
+                    for _, row in fhps_df[::-1].iterrows():
+                        div_rate = str(row.get("税前分红率", "")).strip()
+                        if div_rate and div_rate not in ("--", "nan", "None", ""):
+                            div_val = float(div_rate.replace("%", ""))
+                            lines.append(f"- 股息率: {div_val}%")
+                            structured["dividend_yield"] = div_val
+                            break
+            except Exception:
+                pass
+        except Exception:
+            pass
+            
+    except Exception:
+        pass  # 估值指标失败不影响主流程
+
+
+def get_fundamentals_structured(ticker: str = None) -> dict:
+    """Return structured fundamentals data populated by get_fundamentals().
+
+    Args:
+        ticker: 指定标的代码时，返回该标的的结构化数据（并发安全，推荐）。
+            为 None 时返回"最近一次"调用的数据（legacy 行为，仅单会话安全）。
+
+    Returns empty dict if get_fundamentals() has not been called yet
+    (or has not been called for the given ticker).
     """
-    return dict(_last_fundamentals_structured)
+    with _fundamentals_structured_lock:
+        if ticker:
+            return dict(_fundamentals_structured_by_ticker.get(ticker.upper(), {}))
+        return dict(_last_fundamentals_structured)
+
+
+def _store_fundamentals_structured(ticker: str, structured: dict) -> None:
+    """线程安全地写入 keyed + legacy 两份结构化数据。"""
+    global _last_fundamentals_structured
+    with _fundamentals_structured_lock:
+        _fundamentals_structured_by_ticker[ticker.upper()] = dict(structured)
+        _last_fundamentals_structured = dict(structured)
 
 
 def get_fundamentals(
@@ -604,8 +821,6 @@ def get_fundamentals(
     Side effect: populates ``_last_fundamentals_structured`` with a
     parsed dict that agents can use for post-hoc numeric validation.
     """
-    global _last_fundamentals_structured
-
     if not _is_ashare(ticker):
         return _yfinance_fallback("fundamentals", ticker)
 
@@ -617,7 +832,7 @@ def get_fundamentals(
             indicator="按报告期",
         )
         if df.empty:
-            _last_fundamentals_structured = {}
+            _store_fundamentals_structured(ticker, {})
             return f"No fundamentals data found for {ticker}"
 
         # ---- date filtering (prevent look-ahead bias) ----
@@ -628,7 +843,7 @@ def get_fundamentals(
                 cutoff = pd.Timestamp(curr_date)
                 df = df[dates <= cutoff].copy()
                 if df.empty:
-                    _last_fundamentals_structured = {}
+                    _store_fundamentals_structured(ticker, {})
                     return f"No fundamentals data on or before {curr_date} for {ticker}"
             except Exception:
                 pass  # fall through to unfiltered if date parsing fails
@@ -642,17 +857,33 @@ def get_fundamentals(
             lines.append("")
         # Get latest row (after filtering)
         latest = df.iloc[-1]
-        # Map known Chinese columns
+        # Map known Chinese columns — ALL 24 metrics from 同花顺 financial abstract
         cn_map = {
             "报告期": "Report Date",
             "营业总收入": "Total Revenue",
             "营业总收入同比增长": "Revenue Growth YoY",
             "净利润": "Net Income",
             "净利润同比增长": "Net Income Growth YoY",
+            "扣非净利润": "Net Income (Recurring)",
+            "扣非净利润同比增长": "Net Income Growth YoY (Recurring)",
             "每股收益": "EPS",
+            "每股净资产": "Book Value Per Share",
+            "每股资本公积金": "Capital Reserve Per Share",
+            "每股未分配利润": "Undivided Profit Per Share",
+            "每股经营现金流": "Operating CF Per Share",
+            "销售毛利润": "Gross Margin",   # 部分历史版本用 "销售毛利润" 非 "销售毛利率"
+            "销售毛利率": "Gross Margin",
+            "销售净利率": "Net Margin",
             "净资产收益率": "ROE",
-            "毛利率": "Gross Margin",
-            "净利率": "Net Margin",
+            "净资产收益率-摊薄": "ROE (Diluted)",
+            "营业周期": "Operating Cycle",
+            "存货周转率": "Inventory Turnover",
+            "存货周转天数": "Inventory Turnover Days",
+            "应收账款周转天数": "Receivables Turnover Days",
+            "流动比率": "Current Ratio",
+            "速动比率": "Quick Ratio",
+            "保守速动比率": "Conservative Quick Ratio",
+            "产权比率": "Equity Ratio",
             "资产负债率": "Debt-to-Asset Ratio",
         }
         # Also populate structured dict for numeric_guard
@@ -676,12 +907,94 @@ def get_fundamentals(
                     except ValueError:
                         structured[s_key] = val
 
-        _last_fundamentals_structured = structured
+        _store_fundamentals_structured(ticker, structured)
+        
+        # ── 追加估值指标：PE/PB/PEG ──
+        _append_valuation_metrics(ticker, curr_date, structured, lines)
+        # 估值字段写入 structured 后需再存一次（含 pe/pb/peg 等）
+        _store_fundamentals_structured(ticker, structured)
+        
         return "\n".join(lines) + "\n"
     except Exception as e:
         logger.error(f"Fundamentals fetch failed for {ticker}: {e}")
-        _last_fundamentals_structured = {}
+        _store_fundamentals_structured(ticker, {})
         return f"Error retrieving fundamentals for {ticker}: {str(e)}"
+
+
+# ══════════════════════════════════════════════════════════════════
+# 估值快照 — 单一权威源（Web 面板与所有 Agent prompt 共用）
+# ══════════════════════════════════════════════════════════════════
+
+_valuation_cache: dict = {}
+
+# (中文名, structured键, 单位) — 面板与 prompt 注入共用同一映射
+_VALUATION_FIELDS = [
+    ("市盈率(静态)", "pe_static", "倍"),
+    ("市净率(PB)",   "pb",        "倍"),
+    ("PEG",          "peg",       ""),
+    ("总市值",       "market_cap_亿", "亿"),
+    ("市销率(PS)",   "ps",        "倍"),
+    ("股息率",       "dividend_yield", "%"),
+]
+
+
+def get_valuation_metrics(ticker: str, curr_date: str = None) -> dict:
+    """Canonical price-based valuation metrics — the single source of truth.
+
+    Returns {"市盈率(静态)": (18.36, "倍"), ...} computed by the SAME
+    ``_append_valuation_metrics`` pipeline that ``get_fundamentals`` uses,
+    so the web panel, the fundamentals tool output, and the prompt
+    injection block are guaranteed numerically identical.
+
+    Cached per (ticker, date). Returns {} for non-A-share or on failure.
+    """
+    from datetime import date as _date_obj
+    key = (ticker, curr_date or _date_obj.today().strftime("%Y-%m-%d"))
+    if key in _valuation_cache:
+        return dict(_valuation_cache[key])
+
+    result: dict = {}
+    try:
+        if _is_ashare(ticker):
+            # 优先复用已有的结构化数据（含估值字段），避免重跑整个
+            # get_fundamentals → _append_valuation_metrics 管线
+            structured = get_fundamentals_structured(ticker)
+            has_valuation = any(
+                structured.get(s_key) is not None for _, s_key, _ in _VALUATION_FIELDS
+            )
+            if not has_valuation:
+                get_fundamentals(ticker, curr_date)  # populates structured incl. valuation
+                structured = get_fundamentals_structured(ticker)
+            for cn_name, s_key, unit in _VALUATION_FIELDS:
+                val = structured.get(s_key)
+                if val is not None:
+                    result[cn_name] = (val, unit)
+    except Exception as e:
+        logger.warning(f"Valuation metrics failed for {ticker}: {e}")
+
+    _valuation_cache[key] = result
+    return dict(result)
+
+
+def get_valuation_snapshot(ticker: str, curr_date: str = None) -> str:
+    """Formatted valuation block for injection into EVERY agent's prompt.
+
+    Same numbers as the web panel (both read get_valuation_metrics).
+    Returns "" when no data is available (non-A-share / fetch failure),
+    so callers can concatenate unconditionally.
+    """
+    metrics = get_valuation_metrics(ticker, curr_date)
+    if not metrics:
+        return ""
+    from datetime import date as _date_obj
+    as_of = curr_date or _date_obj.today().strftime("%Y-%m-%d")
+    lines = [f"\n【当前估值快照（截至 {as_of}，基于最新收盘价实时计算，非财报申报值）】"]
+    for cn_name, s_key, unit in _VALUATION_FIELDS:
+        if cn_name in metrics:
+            val, u = metrics[cn_name]
+            lines.append(f"- {cn_name}: {val}{u}")
+    lines.append("（以上估值指标全体分析角色可见，与前端数据面板同源同值）\n")
+    return "\n".join(lines)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -704,7 +1017,7 @@ def get_balance_sheet(
 
         # ---- date filtering (prevent look-ahead bias) ----
         if curr_date:
-            df = _filter_by_report_date(df, curr_date)
+            df = _filter_by_report_date(df, curr_date, symbol=ticker)
             if df.empty:
                 return f"No balance sheet data on or before {curr_date} for {ticker}"
 

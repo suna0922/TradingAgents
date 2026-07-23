@@ -177,6 +177,9 @@ class BacktestEngine:
             date_str = str(row["date"])
             close = float(row["close"])
 
+            # 2-G 修复：每日循环第一行设置 current_date，确保 trailing stop 可用
+            portfolio.current_date = date_str
+
             # ── L0: 季度基本面检测 ───────────────────────────────
             if self.config.fa_quarterly:
                 if self.cache.is_quarter_start(self.config.symbol, date_str):
@@ -341,8 +344,7 @@ class BacktestEngine:
                     self.config.symbol, date_str,
                     self._portfolio_snapshot(portfolio),
                 )
-
-        portfolio.current_date = str(self.df.iloc[-1]["date"])
+                # 2-G 修复：current_date 已在循环开头设置，此处不再需要
 
     # ── Phase 3: 买入持有基准 ────────────────────────────────────
 

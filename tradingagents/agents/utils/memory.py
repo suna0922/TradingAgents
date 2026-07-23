@@ -68,9 +68,22 @@ class TradingMemoryLog:
         """Return entries with outcome:pending (for Phase B)."""
         return [e for e in self.load_entries() if e.get("pending")]
 
-    def get_past_context(self, ticker: str, n_same: int = 5, n_cross: int = 3) -> str:
-        """Return formatted past context string for agent prompt injection."""
+    def get_past_context(self, ticker: str, n_same: int = 5, n_cross: int = 3,
+                         as_of_date: str = "") -> str:
+        """Return formatted past context string for agent prompt injection.
+        
+        1-H 修复：支持 as_of_date 参数，只返回 trade_date ≤ as_of_date 的条目，
+        防止用未来行情结算的 reflection 污染当前决策。
+        """
+        from datetime import datetime as _dt
+        cutoff = _dt.strptime(as_of_date, "%Y-%m-%d") if as_of_date else None
+        
         entries = [e for e in self.load_entries() if not e.get("pending")]
+        if cutoff:
+            entries = [
+                e for e in entries
+                if _dt.strptime(e.get("date", "2000-01-01"), "%Y-%m-%d") <= cutoff
+            ]
         if not entries:
             return ""
 

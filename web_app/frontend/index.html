@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>选股圆桌会议 — 投资大师帮你分析</title>
+  <script src="/vendor/react.production.min.js"></script>
+  <script src="/vendor/react-dom.production.min.js"></script>
+    <script src="/vendor/tailwind.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: { 'table-bg': '#0f0a1a', 'table-card': '#1a1625' },
+          animation: { 'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite' }
+        }
+      }
+    }
+  </script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: linear-gradient(135deg, #0f0a1a 0%, #1a1625 50%, #0f0a1a 100%); min-height: 100vh; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #1a1625; }
+    ::-webkit-scrollbar-thumb { background: #3a3545; border-radius: 3px; }
+    .glass-panel { background: rgba(255,255,255,0.05); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.1); border-radius: 16px; }
+    .glass-panel-dark { background: rgba(0,0,0,0.3); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.1); border-radius: 16px; }
+    .btn-primary { padding: 10px 24px; background: linear-gradient(135deg, #d97706, #f59e0b); color: white; border-radius: 12px; font-weight: 600; border: none; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 12px rgba(217,119,6,0.2); }
+    .btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(217,119,6,0.3); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+    .seat-empty { border: 2px dashed rgba(255,255,255,0.15); }
+    .seat-dragover { border-color: #f59e0b !important; background: rgba(245,158,11,0.15) !important; transform: scale(1.1); }
+    .master-card { cursor: grab; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); position: relative; }
+    .master-card:active { cursor: grabbing; }
+    .master-card:hover { border-color: rgba(245,158,11,0.5); transform: scale(1.02); box-shadow: 0 4px 20px rgba(245,158,11,0.12); }
+    .master-card::before { content: ''; position: absolute; inset: 0; border-radius: 16px; padding: 1px; background: linear-gradient(135deg, rgba(245,158,11,0.15), transparent 60%); -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0); -webkit-mask-composite: xor; mask-composite: exclude; pointer-events: none; opacity: 0; transition: opacity 0.3s; }
+    .master-card:hover::before { opacity: 1; }
+    .industry-tag { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 9999px; font-size: 10px; font-weight: 500; letter-spacing: 0.02em; }
+    .master-card .master-name { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
+    .master-card .master-title { font-size: 11px; font-weight: 400; }
+    .master-card .master-desc { font-size: 11px; line-height: 1.5; }
+    .master-card .master-avatar { font-size: 26px; line-height: 1; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3)); }
+    .fade-in { animation: fadeIn 0.3s ease-out; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner { width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.6s linear infinite; display: inline-block; }
+    .chat-scroll { overflow-y: auto; }
+  </style>
+</head>
+<body>
+  <div id="root"><div style="color:#fff;padding:60px;text-align:center;font-family:sans-serif">⏳ 正在加载选股圆桌会议…</div></div>
+
+  <script>
+    window.addEventListener('error', function(e){
+      var r = document.getElementById('root');
+      if (r) r.innerHTML = '<div style="color:#ff8888;padding:40px;font-family:sans-serif;line-height:1.6">⚠️ 页面脚本出错：<br>' + (e.message || e.error || '未知错误') + '<br><br>请按 F12 打开 Console 截图反馈。</div>';
+    });
+  </script>
+  <script src="/vendor/app.js?v=202607221430"></script>
+</body>
+</html>

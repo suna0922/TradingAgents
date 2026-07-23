@@ -134,13 +134,15 @@ class GraphSetup:
                 "Research Manager": "Research Manager",
             },
         )
-        workflow.add_edge("Numeric Check Bull", "Research Manager")
+        # ★ Chain numeric checks: Bull → Bear → Research Manager (both sides validated)
+        workflow.add_edge("Numeric Check Bull", "Numeric Check Bear")
 
         workflow.add_conditional_edges(
             "Bear Researcher",
             self.conditional_logic.should_continue_debate,
             {
                 "Bull Researcher": "Bull Researcher",
+                "Numeric Check Bull": "Numeric Check Bull",
                 "Numeric Check Bear": "Numeric Check Bear",
                 "Research Manager": "Research Manager",
             },
@@ -153,6 +155,7 @@ class GraphSetup:
             self.conditional_logic.should_continue_risk_analysis,
             {
                 "Conservative Analyst": "Conservative Analyst",
+                "Numeric Check Risk": "Numeric Check Risk",
                 "Portfolio Manager": "Portfolio Manager",
             },
         )
@@ -161,6 +164,7 @@ class GraphSetup:
             self.conditional_logic.should_continue_risk_analysis,
             {
                 "Neutral Analyst": "Neutral Analyst",
+                "Numeric Check Risk": "Numeric Check Risk",
                 "Portfolio Manager": "Portfolio Manager",
             },
         )
